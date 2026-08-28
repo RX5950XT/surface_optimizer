@@ -1,0 +1,53 @@
+# Surface Pro 7 Performance & Energy Optimizer Configuration
+# Hardware Target: Intel Core i7-1065G7 (Ice Lake, 4C/8T)
+
+[power]
+# Energy Performance Preference (0 = Max Performance, 255 = Max Energy Saving)
+ac_epp_idle = 60
+ac_epp_active = 0
+dc_epp_idle = 80
+dc_epp_active = 50
+battery_saver_epp = 100
+battery_saver_threshold_percent = 20
+
+# Turbo Boost Mode (0 = Disabled, 2 = Aggressive)
+ac_boost_mode = 2
+dc_boost_mode = 0
+
+# Fast ramp duration when user activity is detected (ms)
+fast_ramp_duration_ms = 3000
+
+[memory]
+# Pressure threshold to trigger working set & standby trimming (%)
+pressure_threshold_percent = 75
+trim_interval_seconds = 60
+enable_standby_purge = true
+trim_idle_processes_on_ac = true
+trim_idle_processes_on_dc = true
+
+[governor]
+# CPU Hog detection & demotion thresholds
+cpu_hog_threshold_percent = 15.0
+cpu_hog_sustain_seconds = 30
+enable_eco_qos = true
+enable_priority_demotion = true
+
+# Allowlisted system and critical processes exempt from demotion
+allowlist = [
+    "smss.exe", "csrss.exe", "wininit.exe", "services.exe",
+    "lsass.exe", "svchost.exe", "fontdrvhost.exe", "dwm.exe",
+    "explorer.exe", "sihost.exe", "taskhostw.exe", "audiodg.exe",
+    "MsMpEng.exe", "SecurityHealthService.exe", "surface_optimizer.exe"
+]
+
+[daemon]
+# Housekeeping intervals
+housekeeping_interval_ac_ms = 5000
+housekeeping_interval_dc_ms = 15000
+housekeeping_interval_idle_ms = 60000
+
+# Logging settings (DEBUG, INFO, WARN, ERROR, NONE)
+log_level = "INFO"
+log_file_path = "C:\\ProgramData\\surface_optimizer\\surface_optimizer.log"
+log_to_console = true
+log_to_file = true

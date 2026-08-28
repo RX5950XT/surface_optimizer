@@ -1,0 +1,28 @@
+# Build artifacts
+build/
+*.o
+
+# Compiled binaries (keep source, rebuild locally)
+*.exe
+
+# Test runtime output
+tests/*.txt
+tests/*.json
+tests/*.log
+tests/*.exe
+tests/synthetic/*.exe
+
+# Logs
+*.log
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
