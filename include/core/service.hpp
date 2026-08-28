@@ -98,6 +98,11 @@ private:
     void start_session_watch();
     void stop_session_watch();
     bool consume_fg_state();
+    bool create_ui_ipc();
+    void close_ui_ipc();
+    void consume_ui_commands();
+    bool query_service_autostart();
+    bool set_service_autostart(bool enabled);
     void arm_timer(HANDLE hTimer, DWORD period_ms);
     HWND create_message_window();
 
@@ -115,6 +120,9 @@ private:
     HANDLE m_fg_map = nullptr;
     HANDLE m_fg_event = nullptr;
     SharedFgState* m_fg_view = nullptr;
+    HANDLE m_ui_map = nullptr;
+    struct SharedUiState* m_ui_view = nullptr;
+    HWND m_tray_window = nullptr;
     HANDLE m_fg_watch_process = nullptr;
     uint32_t m_last_seen_fg_pid = 0;
     std::atomic<bool> m_stop_requested{false};

@@ -1,6 +1,6 @@
 # CONTEXT.md — Surface Pro 7 效能與能耗優化守護程式
 
-## 專案狀態：✅ Windows 服務 `SurfaceOptimizer` 常駐（StartType=Automatic，開機自啟）。**沒有 GUI**，設定在 `surface_optimizer.toml`。
+## 專案狀態：✅ Windows 服務 `SurfaceOptimizer` 常駐（開機自啟可在系統列勾選）。登入後 `--foreground-watch` 放系統列圖示：左鍵開關優化、右鍵開機自啟動。EPP 等仍改 `surface_optimizer.toml`。
 
 ## 架構概覽
 
@@ -19,10 +19,10 @@
 
 | 模組 | 檔案 | 功能 |
 |------|------|------|
-| M1 核心服務 | `core/service`, `config`, `logger`, `utils` | Windows 服務 SCM 整合、事件驅動迴圈、CLI 介面、單實例 Mutex；服務模式會在使用者工作階段拉起 `--foreground-watch`（Session 0 看不到前台視窗／LastInput） |
+| M1 核心服務 | `core/service`, `config`, `logger`, `utils`, `tray`, `ui_state` | Windows 服務、事件迴圈、CLI；使用者工作階段 `--foreground-watch` 負責前台視窗、LastInput **與系統列圖示**（暫停優化／開機自啟）。全域 IPC 限 `SYSTEM` 與互動使用者，命令值只收 0／1。 |
 | M2 CPU 調度 | `optimizer/power_manager`, `optimizer/burst_policy` | EPP + Boost + **Min processor state** + **CPMINCORES 叫醒核** + **GPU 忙碌維持** + **插電 ASPM Off**；前台／輸入／CPU／IO／GPU 忙碌時 InstantBoost，安靜超過 hysteresis 立刻降回 |
 | M3 記憶體管理 | `optimizer/memory_manager` | EmptyWorkingSet 背景修剪（75%）；Standby List **預設不清**，僅手動或 enable 且 RAM≥85% |
-| M4 進程守護 | `optimizer/process_guardian`, `optimizer/cpu_reserve` | 前台 **HighQoS**、背景 **EcoQoS**；**非白名單行程親和性避開第一顆實體核**（給 DWM／核心留核）。EcoQoS 在這顆均質 CPU 上只降頻、不換核 |
+| M4 進程守護 | `optimizer/process_guardian`, `optimizer/cpu_reserve`, `optimizer/memory_leak_policy` | 前台 **HighQoS**、背景 **EcoQoS**；**非白名單行程親和性避開第一顆實體核**（給 DWM／核心留核）；單次工作集成長 >100 MB 才視為洩漏。EcoQoS 在這顆均質 CPU 上只降頻、不換核 |
 | M5 探測 | `telemetry/platform_probe` | 唯讀：CPUID、CpuSet、PPM、NtPower MHz、EPP 套用延遲。`--status` 不再寫入電源方案 |
 
 ### 編譯工具鏈
@@ -46,8 +46,9 @@
 
 ### 驗證結果
 
-- 自身記憶體佔用 < 2 MB（遠低於 10 MB 目標）
-- 閒置 CPU 佔用 < 0.01%（MsgWaitForMultipleObjectsEx 事件驅動）
+- 2026-08-29 發布版：完整編譯成功、`test_burst_policy` 30 項通過、`audit_ipc_security.ps1` 通過；一般使用者 `--status` 顯示 daemon RUNNING，系統列 IPC 可讀寫。部署 SHA-256：`69AE630A…C3F05652C`。
+- 2026-08-29：服務 + 系統列 helper 私有記憶體 8.3 MB，工作集 23.8 MB。
+- 2026-08-29：30 秒閒置量測服務 1.4892% 單核心、helper 0.1024%；相較修正前服務 2.7913%，下降約 46.7%。
 - 前台升頻：WinEvent 仍是事件驅動；EPP 方案套用實測 ~93 ms；背景 EcoQoS 第一次巡查可套上 100+ 個行程
 - 插電 PCIe ASPM 已改 0（Off），電池仍 2
 - 閒置時把插電 Min processor state 從 100% 放到 5%，頻率才真正降得下去

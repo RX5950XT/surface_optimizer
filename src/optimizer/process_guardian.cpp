@@ -1,5 +1,6 @@
 #include "optimizer/process_guardian.hpp"
 #include "optimizer/cpu_reserve.hpp"
+#include "optimizer/memory_leak_policy.hpp"
 #include "core/logger.hpp"
 #include "core/config.hpp"
 #include "core/utils.hpp"
@@ -65,8 +66,26 @@ void ProcessGuardian::enable_enforcement() {
     }
     m_enforce = true;
     discover_os_reserve_masks();
+    auto snapshots = take_snapshot();
+    for (auto& snap : snapshots) {
+        m_prev_snapshots[snap.pid] = snap;
+    }
     GuardianStats dummy{};
     apply_os_cpu_reserve(m_prev_snapshots, dummy);
+}
+
+void ProcessGuardian::disable_enforcement() {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_enforce = false;
+    restore_restricted_affinity();
+    m_affinity_original.clear();
+    for (const auto& [pid, eco] : m_qos_eco) {
+        if (eco) {
+            apply_high_qos(pid);
+        }
+    }
+    m_qos_eco.clear();
+    LOG_INFO(L"ProcessGuardian: enforcement paused from tray.");
 }
 
 void ProcessGuardian::shutdown() {
@@ -87,7 +106,7 @@ void ProcessGuardian::on_foreground_process_changed(uint32_t pid, const std::wst
     std::lock_guard<std::mutex> lock(m_mutex);
     uint32_t prev = m_current_foreground_pid;
     m_current_foreground_pid = pid;
-    if (!m_initialized) {
+    if (!m_initialized || !m_enforce) {
         return;
     }
 
@@ -282,6 +301,9 @@ bool ProcessGuardian::apply_high_qos(uint32_t pid) {
 void ProcessGuardian::apply_foreground_background_qos(
     const std::unordered_map<uint32_t, ProcessSnapshot>& curr_map,
     GuardianStats& stats) {
+    if (!m_enforce) {
+        return;
+    }
     const auto& config = Config::get_instance();
     size_t newly_high = 0;
     size_t newly_eco = 0;
@@ -401,6 +423,11 @@ bool ProcessGuardian::restrict_off_os_core(uint32_t pid) {
         return false;
     }
 
+    // ponytail: tracked PIDs are assumed unchanged; add creation-time checks only if external affinity tools must be supported.
+    if (m_affinity_original.contains(pid)) {
+        return false;
+    }
+
     HANDLE hProc = OpenProcess(PROCESS_SET_INFORMATION | PROCESS_QUERY_INFORMATION, FALSE, pid);
     if (!hProc) {
         hProc = OpenProcess(PROCESS_SET_INFORMATION | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
@@ -422,10 +449,6 @@ bool ProcessGuardian::restrict_off_os_core(uint32_t pid) {
         return false;
     }
 
-    if (m_affinity_original.find(pid) == m_affinity_original.end()) {
-        m_affinity_original[pid] = proc_mask;
-    }
-
     const BOOL ok = SetProcessAffinityMask(hProc, m_user_affinity_mask);
     CloseHandle(hProc);
     if (!ok) {
@@ -433,6 +456,7 @@ bool ProcessGuardian::restrict_off_os_core(uint32_t pid) {
                   std::to_wstring(pid) + L": " + Utils::get_last_error_message());
         return false;
     }
+    m_affinity_original.emplace(pid, proc_mask);
     return true;
 }
 
@@ -459,8 +483,7 @@ void ProcessGuardian::apply_os_cpu_reserve(
                                          pid == self, system_pid)) {
             continue;
         }
-        const bool had = m_affinity_original.count(pid) != 0;
-        if (restrict_off_os_core(pid) && !had && m_affinity_original.count(pid) != 0) {
+        if (restrict_off_os_core(pid)) {
             ++newly;
         }
     }
@@ -526,6 +549,9 @@ GuardianStats ProcessGuardian::on_housekeeping(uint32_t current_foreground_pid) 
 
     if (!m_initialized) {
         return {};
+    }
+    if (!m_enforce) {
+        return m_last_stats;
     }
 
     m_current_foreground_pid = current_foreground_pid;
@@ -622,10 +648,9 @@ GuardianStats ProcessGuardian::on_housekeeping(uint32_t current_foreground_pid) 
             m_cpu_hog_ticks.erase(pid);
         }
 
-        // Memory leak detection: continuous WS growth > 100MB
+        // Memory leak detection: each sample must grow by more than 100 MB.
         int64_t ws_delta = compute_ws_delta(prev_it->second, curr);
-        constexpr int64_t LEAK_THRESHOLD_BYTES = 100LL * 1024 * 1024; // 100MB
-        if (ws_delta > 0 && curr.working_set_bytes > static_cast<uint64_t>(LEAK_THRESHOLD_BYTES)) {
+        if (is_memory_growth_suspicious(ws_delta)) {
             m_mem_leak_ticks[pid]++;
             if (m_mem_leak_ticks[pid] >= sustain_ticks) {
                 stats.mem_leaks_detected++;
@@ -656,7 +681,7 @@ GuardianStats ProcessGuardian::on_housekeeping(uint32_t current_foreground_pid) 
                 }
                 m_mem_leak_ticks.erase(pid);
             }
-        } else if (ws_delta <= 0) {
+        } else {
             m_mem_leak_ticks.erase(pid);
         }
     }

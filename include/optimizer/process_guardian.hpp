@@ -48,6 +48,7 @@ public:
 
     virtual bool initialize();
     virtual void enable_enforcement();
+    virtual void disable_enforcement();
     virtual void shutdown();
 
     // Core housekeeping entry point (called from Service event loop)

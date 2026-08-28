@@ -2,6 +2,8 @@
 #include "core/logger.hpp"
 #include "core/config.hpp"
 #include "core/utils.hpp"
+#include "core/ui_state.hpp"
+#include "core/tray.hpp"
 #include "optimizer/power_manager.hpp"
 #include "optimizer/memory_manager.hpp"
 #include "optimizer/process_guardian.hpp"
@@ -33,6 +35,19 @@ static const GUID GUID_ACDC_POWER_SOURCE_VAL =
     { 0x5d3e4a2d, 0xe6da, 0x4704, { 0x88, 0x6f, 0x38, 0x50, 0x33, 0x8d, 0xa2, 0x1f } };
 static const GUID GUID_BATTERY_PERCENTAGE_REMAINING_VAL = 
     { 0xa7ad8041, 0xb45a, 0x4cae, { 0x87, 0xa3, 0xee, 0xcb, 0xb4, 0x68, 0xa9, 0xe1 } };
+
+bool create_ipc_security_attributes(SECURITY_ATTRIBUTES& attrs, PSECURITY_DESCRIPTOR& descriptor) {
+    // ponytail: interactive users share this IPC; use per-session SIDs if concurrent-user isolation is needed.
+    constexpr const wchar_t* SDDL = L"D:P(A;;GA;;;SY)(A;;GRGW;;;IU)(A;;0x00100000;;;IU)";
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            SDDL, SDDL_REVISION_1, &descriptor, nullptr)) {
+        return false;
+    }
+    attrs.nLength = sizeof(attrs);
+    attrs.lpSecurityDescriptor = descriptor;
+    attrs.bInheritHandle = FALSE;
+    return true;
+}
 
 } // anonymous namespace
 
@@ -105,16 +120,15 @@ void Service::update_service_status(DWORD current_state, DWORD win32_exit_code, 
 }
 
 HANDLE Service::acquire_global_mutex() {
-    SECURITY_DESCRIPTOR sd{};
-    InitializeSecurityDescriptor(&sd, SECURITY_DESCRIPTOR_REVISION);
-    SetSecurityDescriptorDacl(&sd, TRUE, nullptr, FALSE);
-
     SECURITY_ATTRIBUTES sa{};
-    sa.nLength = sizeof(sa);
-    sa.lpSecurityDescriptor = &sd;
-    sa.bInheritHandle = FALSE;
+    PSECURITY_DESCRIPTOR sd = nullptr;
+    if (!create_ipc_security_attributes(sa, sd)) {
+        LOG_ERROR(L"Failed to create global mutex security descriptor: " + Utils::get_last_error_message());
+        return nullptr;
+    }
 
     HANDLE hMutex = CreateMutexW(&sa, TRUE, MUTEX_NAME);
+    LocalFree(sd);
     if (!hMutex) {
         LOG_ERROR(L"Failed to create global named mutex: " + Utils::get_last_error_message());
         return nullptr;
@@ -191,24 +205,25 @@ void Service::arm_timer(HANDLE hTimer, DWORD period_ms) {
 }
 
 bool Service::create_fg_ipc() {
-    SECURITY_DESCRIPTOR sd{};
-    InitializeSecurityDescriptor(&sd, SECURITY_DESCRIPTOR_REVISION);
-    SetSecurityDescriptorDacl(&sd, TRUE, nullptr, FALSE);
     SECURITY_ATTRIBUTES sa{};
-    sa.nLength = sizeof(sa);
-    sa.lpSecurityDescriptor = &sd;
-    sa.bInheritHandle = FALSE;
+    PSECURITY_DESCRIPTOR sd = nullptr;
+    if (!create_ipc_security_attributes(sa, sd)) {
+        LOG_WARN(L"Failed to create foreground IPC security descriptor: " + Utils::get_last_error_message());
+        return false;
+    }
 
     m_fg_map = CreateFileMappingW(INVALID_HANDLE_VALUE, &sa, PAGE_READWRITE, 0, sizeof(SharedFgState), FG_MAP_NAME);
     if (!m_fg_map) {
+        LocalFree(sd);
         LOG_WARN(L"Failed to create foreground IPC mapping: " + Utils::get_last_error_message());
         return false;
     }
+    m_fg_event = CreateEventW(&sa, FALSE, FALSE, FG_EVENT_NAME);
+    LocalFree(sd);
     m_fg_view = static_cast<SharedFgState*>(MapViewOfFile(m_fg_map, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(SharedFgState)));
     if (m_fg_view) {
         *m_fg_view = SharedFgState{};
     }
-    m_fg_event = CreateEventW(&sa, FALSE, FALSE, FG_EVENT_NAME);
     if (!m_fg_event) {
         LOG_WARN(L"Failed to create foreground IPC event: " + Utils::get_last_error_message());
         return false;
@@ -230,6 +245,119 @@ void Service::close_fg_ipc() {
         CloseHandle(m_fg_event);
         m_fg_event = nullptr;
     }
+}
+
+bool Service::create_ui_ipc() {
+    SECURITY_ATTRIBUTES sa{};
+    PSECURITY_DESCRIPTOR sd = nullptr;
+    if (!create_ipc_security_attributes(sa, sd)) {
+        LOG_WARN(L"Failed to create UI IPC security descriptor: " + Utils::get_last_error_message());
+        return false;
+    }
+
+    m_ui_map = CreateFileMappingW(INVALID_HANDLE_VALUE, &sa, PAGE_READWRITE, 0, sizeof(SharedUiState), surface_optimizer::UI_MAP_NAME);
+    LocalFree(sd);
+    if (!m_ui_map) {
+        LOG_WARN(L"Failed to create UI IPC mapping: " + Utils::get_last_error_message());
+        return false;
+    }
+    m_ui_view = static_cast<SharedUiState*>(MapViewOfFile(m_ui_map, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(SharedUiState)));
+    if (!m_ui_view) {
+        return false;
+    }
+    *m_ui_view = SharedUiState{};
+    m_ui_view->optimizer_on = 1;
+    m_ui_view->autostart = query_service_autostart() ? 1u : 0u;
+    return true;
+}
+
+void Service::close_ui_ipc() {
+    if (m_ui_view) {
+        m_ui_view->stop_watch = 1;
+        UnmapViewOfFile(m_ui_view);
+        m_ui_view = nullptr;
+    }
+    if (m_ui_map) {
+        CloseHandle(m_ui_map);
+        m_ui_map = nullptr;
+    }
+}
+
+bool Service::query_service_autostart() {
+    SC_HANDLE hSCM = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+    if (!hSCM) {
+        return false;
+    }
+    SC_HANDLE hService = OpenServiceW(hSCM, SERVICE_NAME, SERVICE_QUERY_CONFIG);
+    if (!hService) {
+        CloseServiceHandle(hSCM);
+        return false;
+    }
+    DWORD needed = 0;
+    QueryServiceConfigW(hService, nullptr, 0, &needed);
+    std::vector<uint8_t> buf(needed ? needed : 1);
+    bool auto_start = true;
+    if (QueryServiceConfigW(hService, reinterpret_cast<LPQUERY_SERVICE_CONFIGW>(buf.data()), needed, &needed)) {
+        auto* cfg = reinterpret_cast<LPQUERY_SERVICE_CONFIGW>(buf.data());
+        auto_start = (cfg->dwStartType == SERVICE_AUTO_START);
+    }
+    CloseServiceHandle(hService);
+    CloseServiceHandle(hSCM);
+    return auto_start;
+}
+
+bool Service::set_service_autostart(bool enabled) {
+    SC_HANDLE hSCM = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_ALL_ACCESS);
+    if (!hSCM) {
+        LOG_WARN(L"set_service_autostart: OpenSCManager failed: " + Utils::get_last_error_message());
+        return false;
+    }
+    SC_HANDLE hService = OpenServiceW(hSCM, SERVICE_NAME, SERVICE_CHANGE_CONFIG);
+    if (!hService) {
+        CloseServiceHandle(hSCM);
+        LOG_WARN(L"set_service_autostart: OpenService failed: " + Utils::get_last_error_message());
+        return false;
+    }
+    const DWORD type = enabled ? SERVICE_AUTO_START : SERVICE_DEMAND_START;
+    const BOOL ok = ChangeServiceConfigW(
+        hService,
+        SERVICE_NO_CHANGE,
+        type,
+        SERVICE_NO_CHANGE,
+        nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+    CloseServiceHandle(hService);
+    CloseServiceHandle(hSCM);
+    if (!ok) {
+        LOG_WARN(L"ChangeServiceConfig autostart failed: " + Utils::get_last_error_message());
+        return false;
+    }
+    LOG_INFO(std::wstring(L"Service autostart ") + (enabled ? L"enabled" : L"disabled") + L" from tray.");
+    return true;
+}
+
+void Service::consume_ui_commands() {
+    if (!m_ui_view) {
+        return;
+    }
+    if (m_ui_view->cmd_seq != m_ui_view->ack_seq) {
+        if (m_ui_view->cmd_value > 1) {
+            LOG_WARN(L"Ignored invalid UI command value.");
+        } else if (m_ui_view->cmd == UI_CMD_SET_OPTIMIZER) {
+            const bool on = m_ui_view->cmd_value != 0;
+            PowerManager::get_instance().set_paused(!on);
+            if (on) {
+                ProcessGuardian::get_instance().enable_enforcement();
+            } else {
+                ProcessGuardian::get_instance().disable_enforcement();
+            }
+            LOG_INFO(std::wstring(L"Tray optimizer ") + (on ? L"ON" : L"OFF"));
+        } else if (m_ui_view->cmd == UI_CMD_SET_AUTOSTART) {
+            set_service_autostart(m_ui_view->cmd_value != 0);
+        }
+        m_ui_view->ack_seq = m_ui_view->cmd_seq;
+    }
+    m_ui_view->optimizer_on = PowerManager::get_instance().is_paused() ? 0u : 1u;
+    m_ui_view->autostart = query_service_autostart() ? 1u : 0u;
 }
 
 void Service::start_session_watch() {
@@ -289,8 +417,13 @@ void Service::start_session_watch() {
 
 void Service::stop_session_watch() {
     if (!m_fg_watch_process) return;
-    TerminateProcess(m_fg_watch_process, 0);
-    WaitForSingleObject(m_fg_watch_process, 2000);
+    if (m_ui_view) {
+        m_ui_view->stop_watch = 1;
+    }
+    if (WaitForSingleObject(m_fg_watch_process, 2000) != WAIT_OBJECT_0) {
+        TerminateProcess(m_fg_watch_process, 0);
+        WaitForSingleObject(m_fg_watch_process, 1000);
+    }
     CloseHandle(m_fg_watch_process);
     m_fg_watch_process = nullptr;
 }
@@ -369,15 +502,32 @@ void CALLBACK Service::watch_win_event_proc(HWINEVENTHOOK /*hook*/, DWORD event,
 }
 
 int Service::run_foreground_watch(DWORD parent_pid) {
-    HANDLE hMap = OpenFileMappingW(FILE_MAP_ALL_ACCESS, FALSE, FG_MAP_NAME);
+    HANDLE hMap = OpenFileMappingW(FILE_MAP_READ | FILE_MAP_WRITE, FALSE, FG_MAP_NAME);
     HANDLE hEvt = OpenEventW(EVENT_MODIFY_STATE, FALSE, FG_EVENT_NAME);
     if (!hMap || !hEvt) {
         return 1;
     }
-    g_watch_view = static_cast<SharedFgState*>(MapViewOfFile(hMap, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(SharedFgState)));
+    g_watch_view = static_cast<SharedFgState*>(MapViewOfFile(hMap, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, sizeof(SharedFgState)));
     g_watch_event = hEvt;
     if (!g_watch_view) {
         return 2;
+    }
+
+    SharedUiState* ui = nullptr;
+    HANDLE hUiMap = nullptr;
+    HWND tray_hwnd = nullptr;
+    for (int i = 0; i < 50 && !ui; ++i) {
+        hUiMap = OpenFileMappingW(FILE_MAP_READ | FILE_MAP_WRITE, FALSE, UI_MAP_NAME);
+        if (hUiMap) {
+            ui = static_cast<SharedUiState*>(MapViewOfFile(hUiMap, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, sizeof(SharedUiState)));
+        }
+        if (!ui) {
+            Sleep(100);
+        }
+    }
+    tray_hwnd = tray_create_window();
+    if (tray_hwnd) {
+        tray_install(tray_hwnd, ui);
     }
 
     HWINEVENTHOOK hook = SetWinEventHook(
@@ -415,6 +565,12 @@ int Service::run_foreground_watch(DWORD parent_pid) {
         DWORD pid = 0;
         if (fg) GetWindowThreadProcessId(fg, &pid);
         if (pid) publish_watch_state(pid);
+        if (ui) {
+            if (ui->stop_watch) {
+                running = false;
+            }
+            tray_update(ui->optimizer_on != 0, ui->autostart != 0);
+        }
 
         if (wr == WAIT_OBJECT_0 + n) {
             MSG msg;
@@ -429,6 +585,16 @@ int Service::run_foreground_watch(DWORD parent_pid) {
         }
     }
 
+    tray_remove();
+    if (tray_hwnd) {
+        DestroyWindow(tray_hwnd);
+    }
+    if (ui) {
+        UnmapViewOfFile(ui);
+    }
+    if (hUiMap) {
+        CloseHandle(hUiMap);
+    }
     if (hook) UnhookWinEvent(hook);
     if (hTimer) CloseHandle(hTimer);
     if (hParent) CloseHandle(hParent);
@@ -594,6 +760,7 @@ int Service::run_daemon_loop(bool is_interactive) {
     });
 
     create_fg_ipc();
+    create_ui_ipc();
 
     // 6. Register notifications
     if (is_interactive) {
@@ -611,6 +778,10 @@ int Service::run_daemon_loop(bool is_interactive) {
         m_msg_window = create_message_window();
         if (m_msg_window) {
             register_power_notifications(m_msg_window, false);
+        }
+        m_tray_window = tray_create_window();
+        if (m_tray_window) {
+            tray_install(m_tray_window, m_ui_view);
         }
     } else {
         register_power_notifications(m_service_status_handle, true);
@@ -645,9 +816,19 @@ int Service::run_daemon_loop(bool is_interactive) {
             break;
         } else if (hTimer && wait_result == WAIT_OBJECT_0 + 1) {
             consume_fg_state();
-            PowerManager::get_instance().on_housekeeping();
+            consume_ui_commands();
+            if (is_interactive) {
+                tray_update(!PowerManager::get_instance().is_paused(),
+                            m_ui_view ? m_ui_view->autostart != 0 : true);
+            }
 
-            DWORD want = PowerManager::get_instance().desired_poll_interval_ms();
+            const bool paused = PowerManager::get_instance().is_paused();
+            if (!paused) {
+                PowerManager::get_instance().on_housekeeping();
+            }
+
+            DWORD want = paused ? config.power.idle_poll_interval_ms
+                                : PowerManager::get_instance().desired_poll_interval_ms();
             if (want != current_period_ms && want != 0) {
                 current_period_ms = want;
                 arm_timer(hTimer, current_period_ms);
@@ -657,7 +838,8 @@ int Service::run_daemon_loop(bool is_interactive) {
             DWORD slow_ms = m_current_is_ac
                 ? config.daemon.housekeeping_interval_ac_ms
                 : config.daemon.housekeeping_interval_dc_ms;
-            if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_slow).count() >= static_cast<int64_t>(slow_ms)) {
+            if (!paused &&
+                std::chrono::duration_cast<std::chrono::milliseconds>(now - last_slow).count() >= static_cast<int64_t>(slow_ms)) {
                 last_slow = now;
                 MemoryManager::get_instance().on_housekeeping(
                     MemoryManager::get_instance().get_current_foreground_pid(),
@@ -694,11 +876,17 @@ int Service::run_daemon_loop(bool is_interactive) {
     }
 
     unregister_power_notifications();
+    tray_remove();
+    if (m_tray_window) {
+        DestroyWindow(m_tray_window);
+        m_tray_window = nullptr;
+    }
     if (m_msg_window) {
         DestroyWindow(m_msg_window);
         m_msg_window = nullptr;
     }
     close_fg_ipc();
+    close_ui_ipc();
 
     if (hTimer) {
         CancelWaitableTimer(hTimer);

@@ -31,7 +31,8 @@ void print_usage(const wchar_t* exe_name) {
     std::wcout << L"  --stop            Stop the running Windows Service via SCM\n\n";
     std::wcout << L"Daemon Execution Options:\n";
     std::wcout << L"  --daemon          Run in background Windows Service mode (invoked by SCM)\n";
-    std::wcout << L"  --interactive, -i Run in foreground console mode with live log output\n\n";
+    std::wcout << L"  --interactive, -i Run in foreground console mode with live log output\n";
+    std::wcout << L"  --foreground-watch  User-session helper (tray icon + last input; started by the service)\n\n";
     std::wcout << L"Memory Optimization Options:\n";
     std::wcout << L"  --trim-memory     Trim background process working sets and purge standby cache\n";
     std::wcout << L"  --clean-cache     Alias for --trim-memory\n\n";

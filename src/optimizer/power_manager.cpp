@@ -284,6 +284,7 @@ bool PowerManager::apply_active_scheme() {
 }
 
 void PowerManager::evaluate_and_apply_governor(bool force_apply) {
+    if (m_paused) return;
     if (!m_has_active_scheme && !refresh_active_scheme_guid()) return;
     auto& config = Config::get_instance();
 
@@ -486,6 +487,7 @@ void PowerManager::sample_and_update_burst_hold() {
 
 void PowerManager::on_housekeeping() {
     std::lock_guard<std::mutex> lock(m_mutex);
+    if (m_paused) return;
     const bool was_boost = m_is_fast_ramp_active;
     sample_and_update_burst_hold();
     if (was_boost != m_is_fast_ramp_active) {
@@ -570,24 +572,49 @@ std::wstring PowerManager::get_active_scheme_name() const {
     return Utils::guid_to_wstring(m_active_scheme_guid);
 }
 
+void PowerManager::restore_baseline() {
+    if (!m_saved_baseline || !m_has_active_scheme) {
+        return;
+    }
+    LOG_INFO(L"PowerManager: Restoring original power baseline...");
+    write_ac_epp(m_saved_ac_epp);
+    write_dc_epp(m_saved_dc_epp);
+    write_ac_boost(m_saved_ac_boost);
+    write_dc_boost(m_saved_dc_boost);
+    write_index(GUID_PROCTHROTTLE_MIN, true, m_saved_ac_min);
+    write_index(GUID_PROCTHROTTLE_MIN, false, m_saved_dc_min);
+    write_index(GUID_CPMINCORES, true, m_saved_ac_cpmin);
+    write_index(GUID_CPMINCORES, false, m_saved_dc_cpmin);
+    write_index(GUID_SMTUNPARKPOLICY, true, m_saved_ac_smt);
+    write_index(GUID_SMTUNPARKPOLICY, false, m_saved_dc_smt);
+    write_index(GUID_SUBGROUP_PCIEXPRESS, GUID_PCIEXPRESS_ASPM, true, m_saved_ac_aspm);
+    write_index(GUID_SUBGROUP_PCIEXPRESS, GUID_PCIEXPRESS_ASPM, false, m_saved_dc_aspm);
+    apply_active_scheme();
+}
+
+void PowerManager::set_paused(bool paused) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (m_paused == paused) {
+        return;
+    }
+    m_paused = paused;
+    if (paused) {
+        restore_baseline();
+        LOG_INFO(L"PowerManager: optimizer paused from tray.");
+    } else {
+        LOG_INFO(L"PowerManager: optimizer resumed from tray.");
+        evaluate_and_apply_governor(true);
+    }
+}
+
+bool PowerManager::is_paused() const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_paused;
+}
+
 void PowerManager::shutdown() {
     std::lock_guard<std::mutex> lock(m_mutex);
-    if (m_saved_baseline && m_has_active_scheme) {
-        LOG_INFO(L"PowerManager: Restoring original power baseline...");
-        write_ac_epp(m_saved_ac_epp);
-        write_dc_epp(m_saved_dc_epp);
-        write_ac_boost(m_saved_ac_boost);
-        write_dc_boost(m_saved_dc_boost);
-        write_index(GUID_PROCTHROTTLE_MIN, true, m_saved_ac_min);
-        write_index(GUID_PROCTHROTTLE_MIN, false, m_saved_dc_min);
-        write_index(GUID_CPMINCORES, true, m_saved_ac_cpmin);
-        write_index(GUID_CPMINCORES, false, m_saved_dc_cpmin);
-        write_index(GUID_SMTUNPARKPOLICY, true, m_saved_ac_smt);
-        write_index(GUID_SMTUNPARKPOLICY, false, m_saved_dc_smt);
-        write_index(GUID_SUBGROUP_PCIEXPRESS, GUID_PCIEXPRESS_ASPM, true, m_saved_ac_aspm);
-        write_index(GUID_SUBGROUP_PCIEXPRESS, GUID_PCIEXPRESS_ASPM, false, m_saved_dc_aspm);
-        apply_active_scheme();
-    }
+    restore_baseline();
     g_gpu.close();
     m_has_active_scheme = false;
 }

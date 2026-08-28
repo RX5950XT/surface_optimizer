@@ -35,8 +35,10 @@
 ### 🔧 服務與設定
 
 - 以 **Windows 服務** `SurfaceOptimizer` 常駐（Session 0），開機自動啟動；掛掉會 5／10／30 秒重開
-- 服務會在使用者工作階段另開 `--foreground-watch`（否則看不到前台視窗）
-- **沒有 GUI**。設定全在 exe 同目錄的 `surface_optimizer.toml`，改完要重啟服務才生效
+- 登入後系統列有圖示（可能在溢位區）：**左鍵開關優化**，右鍵可勾「優化」「開機自啟動」
+- 服務會在使用者工作階段另開 `--foreground-watch`（圖示 + 前台視窗／LastInput）
+- 系統列 IPC 只允許 `SYSTEM` 與互動使用者讀寫，命令值只接受開／關
+- 沒有完整設定視窗。EPP 等參數仍在 `surface_optimizer.toml`，改完要重啟服務才生效
 - 單實例保護（Global Mutex）
 
 ---
@@ -45,8 +47,8 @@
 
 | 指標 | 目標 | 實測 |
 |------|------|------|
-| 常駐記憶體 | < 10 MB | **~2 MB** |
-| 閒置 CPU 佔用 | < 0.1% | **< 0.01%** |
+| 常駐私有記憶體 | < 10 MB | **8.3 MB**（服務 + 系統列 helper；工作集 23.8 MB） |
+| 閒置 CPU 佔用 | < 0.1% | **服務 1.49% + helper 0.10% 單核心**（30 秒實測） |
 | 前台升頻（方案套用到 EPP 讀回） | < 100 ms | **~93 ms**（本機實測） |
 | 二進位檔大小 | < 5 MB | **~1.35 MB** |
 | 外部依賴 | 0 | **0** |
@@ -66,11 +68,14 @@ surface_optimizer/
 │   │   ├── config.hpp                #   設定載入與結構定義
 │   │   ├── logger.hpp                #   分級日誌（Debug/Info/Warn/Error）
 │   │   ├── service.hpp               #   Windows 服務 SCM 整合與事件迴圈
+│   │   ├── tray.hpp                  #   系統列圖示
+│   │   ├── ui_state.hpp              #   系統列 IPC 狀態
 │   │   └── utils.hpp                 #   權限管理、字串轉換、錯誤格式化
 │   ├── optimizer/
 │   │   ├── power_manager.hpp         #   CPU 動態能耗調度（EPP / Min state / unpark / 忙時維持）
 │   │   ├── burst_policy.hpp          #   升頻維持／降頻條件（可單測）
 │   │   ├── cpu_reserve.hpp           #   系統預留核的親和性計算（可單測）
+│   │   ├── memory_leak_policy.hpp    #   工作集洩漏判定（可單測）
 │   │   ├── memory_manager.hpp        #   記憶體修剪與 Standby List 釋放
 │   │   └── process_guardian.hpp      #   EcoQoS／HighQoS／系統預留核
 │   └── telemetry/
@@ -81,6 +86,7 @@ surface_optimizer/
 │   │   ├── config.cpp
 │   │   ├── logger.cpp
 │   │   ├── service.cpp               #   主事件迴圈（MsgWaitForMultipleObjectsEx）
+│   │   ├── tray.cpp                  #   系統列圖示實作
 │   │   └── utils.cpp
 │   ├── optimizer/
 │   │   ├── power_manager.cpp
@@ -99,6 +105,7 @@ surface_optimizer/
     ├── test_m2_challenger.ps1        #   CPU 調度對抗性測試
     ├── test_m3_stress.ps1            #   記憶體壓力測試
     ├── test_burst_policy.cpp         #   忙時維持／閒置降頻策略單測
+    ├── audit_ipc_security.ps1        #   IPC 權限與命令驗證稽核
     ├── test_ramp_latency.cpp         #   前台升頻延遲精密測量
     ├── forensic_m3_verifier.cpp      #   記憶體修剪鑑識驗證
     ├── test_m3_empirical_challenger.cpp
@@ -230,4 +237,7 @@ cd tests\synthetic && .\build_synthetic.ps1
 # 忙時維持／閒置降頻策略單測
 g++ -std=c++20 -Iinclude tests/test_burst_policy.cpp -o tests/test_burst_policy.exe
 .\tests\test_burst_policy.exe
+
+# 系統列 IPC 權限與命令稽核
+.\tests\audit_ipc_security.ps1
 ```

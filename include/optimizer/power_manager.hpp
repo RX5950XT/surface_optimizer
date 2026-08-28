@@ -43,6 +43,8 @@ public:
     virtual bool is_fast_ramp_active() const;
     virtual uint32_t desired_poll_interval_ms() const;
     virtual void set_last_input_idle_ms(uint32_t idle_ms);
+    virtual void set_paused(bool paused);
+    virtual bool is_paused() const;
 
     virtual void shutdown();
 
@@ -75,6 +77,7 @@ private:
     bool write_dc_boost(uint32_t boost_mode);
     bool apply_active_scheme();
     void evaluate_and_apply_governor(bool force_apply = false);
+    void restore_baseline();
     void sample_and_update_burst_hold();
     bool sample_process(uint32_t pid, uint64_t& cpu_100ns, uint64_t& io_ops) const;
 
@@ -96,6 +99,7 @@ private:
     uint32_t m_saved_ac_aspm = 2;
     uint32_t m_saved_dc_aspm = 2;
     bool m_saved_baseline = false;
+    bool m_paused = false;
 
     // Active runtime state
     PowerSource m_current_power_source = PowerSource::AC;

@@ -1,11 +1,13 @@
 #include "optimizer/burst_policy.hpp"
 #include "optimizer/cpu_reserve.hpp"
+#include "optimizer/memory_leak_policy.hpp"
 #include <iostream>
 #include <cstdlib>
 
 using surface_optimizer::BurstHoldInput;
 using surface_optimizer::affinity_uses_os_core;
 using surface_optimizer::cpu_percent_one_core;
+using surface_optimizer::is_memory_growth_suspicious;
 using surface_optimizer::should_hold_boost;
 using surface_optimizer::should_reserve_os_core;
 using surface_optimizer::should_restrict_off_os_core;
@@ -99,6 +101,12 @@ int main() {
     expect(!should_restrict_off_os_core(false, false, true), "PID 0/4 stay on all cores");
     expect(affinity_uses_os_core(0xFF, 0x03), "full mask uses OS core");
     expect(!affinity_uses_os_core(0xFC, 0x03), "restricted mask is off OS core");
+
+    constexpr int64_t mib = 1024LL * 1024;
+    expect(!is_memory_growth_suspicious(0), "flat working set is not a memory leak");
+    expect(!is_memory_growth_suspicious(99 * mib), "99 MB growth is not a memory leak");
+    expect(!is_memory_growth_suspicious(100 * mib), "100 MB growth is not a memory leak");
+    expect(is_memory_growth_suspicious(101 * mib), "over 100 MB growth is a memory leak");
 
     if (g_failed != 0) {
         std::cout << g_failed << " failed\n";
