@@ -14,14 +14,24 @@ battery_saver_threshold_percent = 20
 ac_boost_mode = 2
 dc_boost_mode = 0
 
-# Fast ramp duration when user activity is detected (ms)
+# Fallback hold when the foreground process cannot be sampled (ms)
 fast_ramp_duration_ms = 3000
+# Burst poll / drop hysteresis
+busy_poll_interval_ms = 100
+idle_poll_interval_ms = 250
+idle_hysteresis_ms = 250
+last_input_hold_ms = 1000
+boost_grace_ms = 200
+busy_cpu_percent_threshold = 8.0
+busy_gpu_percent_threshold = 15.0
 
 [memory]
 # Pressure threshold to trigger working set & standby trimming (%)
 pressure_threshold_percent = 75
 trim_interval_seconds = 60
-enable_standby_purge = true
+# Auto Standby purge is off; working-set trim still fires at 75%.
+# If you set this true, Standby is only purged when RAM load >= 85%.
+enable_standby_purge = false
 trim_idle_processes_on_ac = true
 trim_idle_processes_on_dc = true
 

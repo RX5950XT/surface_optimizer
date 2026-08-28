@@ -22,6 +22,13 @@ std::wstring trim(const std::wstring& str) {
     return str.substr(first, last - first + 1);
 }
 
+std::wstring strip_quotes(const std::wstring& str) {
+    if (str.size() >= 2 && str.front() == L'"' && str.back() == L'"') {
+        return str.substr(1, str.size() - 2);
+    }
+    return str;
+}
+
 std::wstring to_lower(std::wstring str) {
     std::transform(str.begin(), str.end(), str.begin(), [](wchar_t c) {
         return static_cast<wchar_t>(std::towlower(c));
@@ -128,6 +135,13 @@ bool Config::load_from_file(const std::wstring& file_path) {
             else if (key == L"ac_boost_mode") power.ac_boost_mode = parse_uint32(val, power.ac_boost_mode);
             else if (key == L"dc_boost_mode") power.dc_boost_mode = parse_uint32(val, power.dc_boost_mode);
             else if (key == L"fast_ramp_duration_ms") power.fast_ramp_duration_ms = parse_uint32(val, power.fast_ramp_duration_ms);
+            else if (key == L"busy_poll_interval_ms") power.busy_poll_interval_ms = parse_uint32(val, power.busy_poll_interval_ms);
+            else if (key == L"idle_poll_interval_ms") power.idle_poll_interval_ms = parse_uint32(val, power.idle_poll_interval_ms);
+            else if (key == L"idle_hysteresis_ms") power.idle_hysteresis_ms = parse_uint32(val, power.idle_hysteresis_ms);
+            else if (key == L"last_input_hold_ms") power.last_input_hold_ms = parse_uint32(val, power.last_input_hold_ms);
+            else if (key == L"boost_grace_ms") power.boost_grace_ms = parse_uint32(val, power.boost_grace_ms);
+            else if (key == L"busy_cpu_percent_threshold") power.busy_cpu_percent_threshold = parse_double(val, power.busy_cpu_percent_threshold);
+            else if (key == L"busy_gpu_percent_threshold") power.busy_gpu_percent_threshold = parse_double(val, power.busy_gpu_percent_threshold);
         } else if (current_section == L"memory") {
             if (key == L"pressure_threshold_percent") memory.pressure_threshold_percent = parse_uint32(val, memory.pressure_threshold_percent);
             else if (key == L"trim_interval_seconds") memory.trim_interval_seconds = parse_uint32(val, memory.trim_interval_seconds);
@@ -147,8 +161,8 @@ bool Config::load_from_file(const std::wstring& file_path) {
             if (key == L"housekeeping_interval_ac_ms") daemon.housekeeping_interval_ac_ms = parse_uint32(val, daemon.housekeeping_interval_ac_ms);
             else if (key == L"housekeeping_interval_dc_ms") daemon.housekeeping_interval_dc_ms = parse_uint32(val, daemon.housekeeping_interval_dc_ms);
             else if (key == L"housekeeping_interval_idle_ms") daemon.housekeeping_interval_idle_ms = parse_uint32(val, daemon.housekeeping_interval_idle_ms);
-            else if (key == L"log_level") daemon.log_level = val;
-            else if (key == L"log_file_path") daemon.log_file_path = val;
+            else if (key == L"log_level") daemon.log_level = strip_quotes(val);
+            else if (key == L"log_file_path") daemon.log_file_path = strip_quotes(val);
             else if (key == L"log_to_console") daemon.log_to_console = parse_bool(val, daemon.log_to_console);
             else if (key == L"log_to_file") daemon.log_to_file = parse_bool(val, daemon.log_to_file);
         }
@@ -174,7 +188,14 @@ bool Config::save_to_file(const std::wstring& file_path) const {
     file << L"battery_saver_threshold_percent = " << power.battery_saver_threshold_percent << L"\n";
     file << L"ac_boost_mode = " << power.ac_boost_mode << L"\n";
     file << L"dc_boost_mode = " << power.dc_boost_mode << L"\n";
-    file << L"fast_ramp_duration_ms = " << power.fast_ramp_duration_ms << L"\n\n";
+    file << L"fast_ramp_duration_ms = " << power.fast_ramp_duration_ms << L"\n";
+    file << L"busy_poll_interval_ms = " << power.busy_poll_interval_ms << L"\n";
+    file << L"idle_poll_interval_ms = " << power.idle_poll_interval_ms << L"\n";
+    file << L"idle_hysteresis_ms = " << power.idle_hysteresis_ms << L"\n";
+    file << L"last_input_hold_ms = " << power.last_input_hold_ms << L"\n";
+    file << L"boost_grace_ms = " << power.boost_grace_ms << L"\n";
+    file << L"busy_cpu_percent_threshold = " << power.busy_cpu_percent_threshold << L"\n";
+    file << L"busy_gpu_percent_threshold = " << power.busy_gpu_percent_threshold << L"\n\n";
 
     file << L"[memory]\n";
     file << L"pressure_threshold_percent = " << memory.pressure_threshold_percent << L"\n";

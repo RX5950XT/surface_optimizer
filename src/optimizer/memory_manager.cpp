@@ -337,10 +337,11 @@ void MemoryManager::on_housekeeping(uint32_t current_foreground_pid, bool is_ac)
     if (cooldown < 10) cooldown = 10;
 
     if (high_pressure && static_cast<uint32_t>(elapsed_sec) >= cooldown) {
+        const bool purge_standby = config.memory.enable_standby_purge && critical_pressure;
         LOG_INFO(L"Memory load threshold reached (" + std::to_wstring(stats.memory_load_percent) +
                  L"% >= " + std::to_wstring(config.memory.pressure_threshold_percent) +
                  L"%). Triggering background memory optimization...");
-        optimize_memory(current_foreground_pid, config.memory.enable_standby_purge);
+        optimize_memory(current_foreground_pid, purge_standby);
     }
 }
 

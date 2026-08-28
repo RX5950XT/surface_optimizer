@@ -1,4 +1,5 @@
 #include "optimizer/process_guardian.hpp"
+#include "optimizer/cpu_reserve.hpp"
 #include "core/logger.hpp"
 #include "core/config.hpp"
 #include "core/utils.hpp"
@@ -7,6 +8,7 @@
 #include <cwctype>
 #include <sstream>
 #include <iomanip>
+#include <unordered_map>
 
 namespace surface_optimizer {
 
@@ -51,23 +53,67 @@ bool ProcessGuardian::initialize() {
 
     m_initialized = true;
     LOG_INFO(L"ProcessGuardian initialized. Baseline captured for " +
-             std::to_wstring(m_prev_snapshots.size()) + L" processes.");
+             std::to_wstring(m_prev_snapshots.size()) +
+             L" processes. Foreground HighQoS / background EcoQoS armed.");
     return true;
+}
+
+void ProcessGuardian::enable_enforcement() {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (!m_initialized) {
+        return;
+    }
+    m_enforce = true;
+    discover_os_reserve_masks();
+    GuardianStats dummy{};
+    apply_os_cpu_reserve(m_prev_snapshots, dummy);
 }
 
 void ProcessGuardian::shutdown() {
     std::lock_guard<std::mutex> lock(m_mutex);
+    restore_restricted_affinity();
     m_prev_snapshots.clear();
     m_cpu_hog_ticks.clear();
     m_mem_leak_ticks.clear();
     m_throttled_pids.clear();
+    m_qos_eco.clear();
+    m_affinity_original.clear();
+    m_enforce = false;
     m_initialized = false;
     LOG_INFO(L"ProcessGuardian shutdown complete.");
 }
 
 void ProcessGuardian::on_foreground_process_changed(uint32_t pid, const std::wstring& /*image_name*/) {
     std::lock_guard<std::mutex> lock(m_mutex);
+    uint32_t prev = m_current_foreground_pid;
     m_current_foreground_pid = pid;
+    if (!m_initialized) {
+        return;
+    }
+
+    if (pid != 0 && pid != 4 && pid != GetCurrentProcessId()) {
+        if (apply_high_qos(pid)) {
+            m_qos_eco[pid] = false;
+        }
+        if (m_enforce) {
+            std::wstring name = Utils::get_process_name_by_pid(pid);
+            if (should_restrict_off_os_core(is_process_allowlisted(name), false, false)) {
+                restrict_off_os_core(pid);
+            }
+        }
+    }
+
+    const auto& config = Config::get_instance();
+    if (!config.governor.enable_eco_qos || prev == 0 || prev == pid) {
+        return;
+    }
+    std::wstring prev_name = Utils::get_process_name_by_pid(prev);
+    if (is_protected(prev, prev_name)) {
+        return;
+    }
+    if (apply_eco_qos(prev)) {
+        m_qos_eco[prev] = true;
+    }
 }
 
 bool ProcessGuardian::is_process_allowlisted(const std::wstring& image_name) const {
@@ -186,9 +232,11 @@ int64_t ProcessGuardian::compute_ws_delta(const ProcessSnapshot& prev, const Pro
     return static_cast<int64_t>(curr.working_set_bytes) - static_cast<int64_t>(prev.working_set_bytes);
 }
 
-bool ProcessGuardian::apply_eco_qos(uint32_t pid) {
+bool ProcessGuardian::set_execution_speed_throttle(uint32_t pid, bool enable_eco) const {
     HANDLE hProc = OpenProcess(PROCESS_SET_INFORMATION, FALSE, pid);
-    if (!hProc) return false;
+    if (!hProc) {
+        return false;
+    }
 
     // ProcessPowerThrottling = 4, PROCESS_POWER_THROTTLING_EXECUTION_SPEED = 1
     struct {
@@ -198,26 +246,250 @@ bool ProcessGuardian::apply_eco_qos(uint32_t pid) {
     } throttle_state;
 
     throttle_state.Version = 1;
-    throttle_state.ControlMask = 1; // PROCESS_POWER_THROTTLING_EXECUTION_SPEED
-    throttle_state.StateMask = 1;   // Enable EcoQoS
+    throttle_state.ControlMask = 1;
+    throttle_state.StateMask = enable_eco ? 1u : 0u;
 
     BOOL result = SetProcessInformation(
         hProc,
-        static_cast<PROCESS_INFORMATION_CLASS>(4), // ProcessPowerThrottling
+        static_cast<PROCESS_INFORMATION_CLASS>(4),
         &throttle_state,
         sizeof(throttle_state)
     );
-
     CloseHandle(hProc);
+    return result != FALSE;
+}
 
-    if (result) {
-        LOG_INFO(L"ProcessGuardian: Applied EcoQoS to PID " + std::to_wstring(pid));
-    } else {
+bool ProcessGuardian::apply_eco_qos(uint32_t pid) {
+    if (!set_execution_speed_throttle(pid, true)) {
         LOG_DEBUG(L"ProcessGuardian: Failed to apply EcoQoS to PID " + std::to_wstring(pid) +
                   L": " + Utils::get_last_error_message());
+        return false;
+    }
+    LOG_DEBUG(L"ProcessGuardian: Applied EcoQoS to PID " + std::to_wstring(pid));
+    return true;
+}
+
+bool ProcessGuardian::apply_high_qos(uint32_t pid) {
+    if (!set_execution_speed_throttle(pid, false)) {
+        LOG_DEBUG(L"ProcessGuardian: Failed to apply HighQoS to PID " + std::to_wstring(pid) +
+                  L": " + Utils::get_last_error_message());
+        return false;
+    }
+    LOG_DEBUG(L"ProcessGuardian: Applied HighQoS to PID " + std::to_wstring(pid));
+    return true;
+}
+
+void ProcessGuardian::apply_foreground_background_qos(
+    const std::unordered_map<uint32_t, ProcessSnapshot>& curr_map,
+    GuardianStats& stats) {
+    const auto& config = Config::get_instance();
+    size_t newly_high = 0;
+    size_t newly_eco = 0;
+
+    for (auto it = m_qos_eco.begin(); it != m_qos_eco.end(); ) {
+        if (curr_map.find(it->first) == curr_map.end()) {
+            it = m_qos_eco.erase(it);
+        } else {
+            ++it;
+        }
     }
 
-    return result != FALSE;
+    for (const auto& [pid, curr] : curr_map) {
+        if (pid == 0 || pid == 4 || pid == GetCurrentProcessId()) {
+            continue;
+        }
+        if (pid == m_current_foreground_pid) {
+            auto it = m_qos_eco.find(pid);
+            if (it != m_qos_eco.end() && !it->second) {
+                continue;
+            }
+            if (apply_high_qos(pid)) {
+                m_qos_eco[pid] = false;
+                ++newly_high;
+            }
+            continue;
+        }
+        if (!config.governor.enable_eco_qos) {
+            continue;
+        }
+        if (is_protected(pid, curr.image_name)) {
+            continue;
+        }
+        auto it = m_qos_eco.find(pid);
+        if (it != m_qos_eco.end() && it->second) {
+            continue;
+        }
+        if (apply_eco_qos(pid)) {
+            m_qos_eco[pid] = true;
+            ++newly_eco;
+        }
+    }
+
+    for (const auto& [pid, eco] : m_qos_eco) {
+        if (eco) {
+            stats.ecoqos_active++;
+        } else {
+            stats.highqos_active++;
+        }
+    }
+
+    if (newly_high > 0 || newly_eco > 0) {
+        LOG_INFO(L"ProcessGuardian: QoS updated (High +" + std::to_wstring(newly_high) +
+                 L", Eco +" + std::to_wstring(newly_eco) + L")");
+    }
+
+    apply_os_cpu_reserve(curr_map, stats);
+}
+
+void ProcessGuardian::discover_os_reserve_masks() {
+    m_os_core_mask = 0;
+    m_user_affinity_mask = 0;
+
+    DWORD len = 0;
+    GetLogicalProcessorInformation(nullptr, &len);
+    if (GetLastError() != ERROR_INSUFFICIENT_BUFFER || len == 0) {
+        LOG_WARN(L"ProcessGuardian: cannot read processor topology; OS CPU reserve disabled.");
+        return;
+    }
+
+    std::vector<uint8_t> buf(len);
+    auto* info = reinterpret_cast<SYSTEM_LOGICAL_PROCESSOR_INFORMATION*>(buf.data());
+    if (!GetLogicalProcessorInformation(info, &len)) {
+        LOG_WARN(L"ProcessGuardian: GetLogicalProcessorInformation failed: " +
+                 Utils::get_last_error_message());
+        return;
+    }
+
+    DWORD_PTR first_core = 0;
+    uint32_t cores = 0;
+    const DWORD count = len / sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION);
+    for (DWORD i = 0; i < count; ++i) {
+        if (info[i].Relationship != RelationProcessorCore) {
+            continue;
+        }
+        if (cores == 0) {
+            first_core = info[i].ProcessorMask;
+        }
+        ++cores;
+    }
+
+    if (!should_reserve_os_core(cores) || first_core == 0) {
+        LOG_INFO(L"ProcessGuardian: OS CPU reserve skipped (physical cores=" +
+                 std::to_wstring(cores) + L").");
+        return;
+    }
+
+    DWORD_PTR proc_mask = 0;
+    DWORD_PTR sys_mask = 0;
+    if (!GetProcessAffinityMask(GetCurrentProcess(), &proc_mask, &sys_mask) || sys_mask == 0) {
+        LOG_WARN(L"ProcessGuardian: GetProcessAffinityMask failed; OS CPU reserve disabled.");
+        return;
+    }
+
+    m_os_core_mask = first_core;
+    m_user_affinity_mask = static_cast<DWORD_PTR>(
+        user_affinity_mask(static_cast<uint64_t>(sys_mask), static_cast<uint64_t>(first_core)));
+    std::wstringstream mask_log;
+    mask_log << std::hex << L"ProcessGuardian: OS CPU reserve armed. os_core=0x"
+             << m_os_core_mask << L" user=0x" << m_user_affinity_mask
+             << L" (user processes kept off the first physical core).";
+    LOG_INFO(mask_log.str());
+}
+
+bool ProcessGuardian::restrict_off_os_core(uint32_t pid) {
+    if (m_user_affinity_mask == 0 || m_os_core_mask == 0) {
+        return false;
+    }
+
+    HANDLE hProc = OpenProcess(PROCESS_SET_INFORMATION | PROCESS_QUERY_INFORMATION, FALSE, pid);
+    if (!hProc) {
+        hProc = OpenProcess(PROCESS_SET_INFORMATION | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    }
+    if (!hProc) {
+        return false;
+    }
+
+    DWORD_PTR proc_mask = 0;
+    DWORD_PTR sys_mask = 0;
+    if (!GetProcessAffinityMask(hProc, &proc_mask, &sys_mask) || proc_mask == 0) {
+        CloseHandle(hProc);
+        return false;
+    }
+
+    if (!affinity_uses_os_core(static_cast<uint64_t>(proc_mask),
+                               static_cast<uint64_t>(m_os_core_mask))) {
+        CloseHandle(hProc);
+        return false;
+    }
+
+    if (m_affinity_original.find(pid) == m_affinity_original.end()) {
+        m_affinity_original[pid] = proc_mask;
+    }
+
+    const BOOL ok = SetProcessAffinityMask(hProc, m_user_affinity_mask);
+    CloseHandle(hProc);
+    if (!ok) {
+        LOG_DEBUG(L"ProcessGuardian: SetProcessAffinityMask failed PID " +
+                  std::to_wstring(pid) + L": " + Utils::get_last_error_message());
+        return false;
+    }
+    return true;
+}
+
+void ProcessGuardian::apply_os_cpu_reserve(
+    const std::unordered_map<uint32_t, ProcessSnapshot>& curr_map,
+    GuardianStats& stats) {
+    if (!m_enforce || m_user_affinity_mask == 0) {
+        return;
+    }
+
+    for (auto it = m_affinity_original.begin(); it != m_affinity_original.end(); ) {
+        if (curr_map.find(it->first) == curr_map.end()) {
+            it = m_affinity_original.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    size_t newly = 0;
+    const uint32_t self = GetCurrentProcessId();
+    for (const auto& [pid, curr] : curr_map) {
+        const bool system_pid = (pid == 0 || pid == 4);
+        if (!should_restrict_off_os_core(is_process_allowlisted(curr.image_name),
+                                         pid == self, system_pid)) {
+            continue;
+        }
+        const bool had = m_affinity_original.count(pid) != 0;
+        if (restrict_off_os_core(pid) && !had && m_affinity_original.count(pid) != 0) {
+            ++newly;
+        }
+    }
+
+    stats.affinity_restricted = m_affinity_original.size();
+    if (newly > 0) {
+        LOG_INFO(L"ProcessGuardian: OS CPU reserve applied to " +
+                 std::to_wstring(newly) + L" processes (active=" +
+                 std::to_wstring(m_affinity_original.size()) + L").");
+    }
+}
+
+void ProcessGuardian::restore_restricted_affinity() {
+    if (m_affinity_original.empty()) {
+        return;
+    }
+    size_t restored = 0;
+    for (const auto& [pid, original] : m_affinity_original) {
+        HANDLE hProc = OpenProcess(PROCESS_SET_INFORMATION, FALSE, pid);
+        if (!hProc) {
+            continue;
+        }
+        if (SetProcessAffinityMask(hProc, original)) {
+            ++restored;
+        }
+        CloseHandle(hProc);
+    }
+    LOG_INFO(L"ProcessGuardian: restored affinity on " + std::to_wstring(restored) +
+             L" processes.");
 }
 
 bool ProcessGuardian::demote_priority(uint32_t pid) {
@@ -290,6 +562,8 @@ GuardianStats ProcessGuardian::on_housekeeping(uint32_t current_foreground_pid) 
             ++it;
         }
     }
+
+    apply_foreground_background_qos(curr_map, stats);
 
     // Analyze each process
     for (const auto& [pid, curr] : curr_map) {

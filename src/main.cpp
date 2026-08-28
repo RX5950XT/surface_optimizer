@@ -5,10 +5,12 @@
 #include "optimizer/power_manager.hpp"
 #include "optimizer/memory_manager.hpp"
 #include "optimizer/process_guardian.hpp"
+#include "telemetry/platform_probe.hpp"
 #include <iostream>
 #include <iomanip>
 #include <string>
 #include <vector>
+#include <cstdlib>
 
 namespace surface_optimizer {
 
@@ -34,8 +36,8 @@ void print_usage(const wchar_t* exe_name) {
     std::wcout << L"  --trim-memory     Trim background process working sets and purge standby cache\n";
     std::wcout << L"  --clean-cache     Alias for --trim-memory\n\n";
     std::wcout << L"Information & Telemetry:\n";
-    std::wcout << L"  --status          Query Windows Service status, daemon mutex, and state\n";
-    std::wcout << L"  --benchmark       Run automated performance & memory optimization benchmark\n";
+    std::wcout << L"  --status          Query service, live CPU/HWP/parking telemetry (read-only)\n";
+    std::wcout << L"  --benchmark       Run governor verification plus EPP apply-latency measurement\n";
     std::wcout << L"  --version, -v     Display program version and build details\n";
     std::wcout << L"  --help, -h        Display this help documentation\n\n";
 }
@@ -74,20 +76,9 @@ void show_status() {
     std::wcout << L"  Daemon Running:  " << (info.is_daemon_mutex_held ? L"YES (Active instance holds global mutex)" : L"NO (No active daemon detected)") << L"\n";
     std::wcout << L"\n";
 
-    std::wcout << L"[CPU Dynamic Governor & Power State]\n";
-    auto& pm = PowerManager::get_instance();
-    if (pm.initialize()) {
-        std::wcout << L"  Active Scheme:   " << pm.get_active_scheme_name() << L"\n";
-        std::wcout << L"  Power Source:    " << (pm.get_current_power_source() == PowerSource::AC ? L"AC (Plugged in)" : L"DC (Battery)")
-                   << L" (" << pm.get_current_battery_percent() << L"%)\n";
-        std::wcout << L"  Current EPP:     " << pm.get_current_epp() << L"% (0=MaxPerf, 100=MaxEfficiency)\n";
-        std::wcout << L"  Boost Mode:      " << (pm.get_current_boost_mode() == 2 ? L"Aggressive (2)" : (pm.get_current_boost_mode() == 1 ? L"Enabled (1)" : L"Disabled (0)")) << L"\n";
-        std::wcout << L"  Governor Profile: " << (pm.get_current_profile() == PerformanceProfile::BatterySaver ? L"BatterySaver (<20% throttle)" : (pm.get_current_profile() == PerformanceProfile::InstantBoost ? L"InstantBoost (<100ms fast-ramp)" : (pm.get_current_profile() == PerformanceProfile::HighPerformance ? L"HighPerformance (AC)" : L"Balanced (DC)"))) << L"\n";
-        pm.shutdown();
-    } else {
-        std::wcout << L"  Unable to query active power scheme.\n";
-    }
-    std::wcout << L"\n";
+    std::wcout << L"[CPU / HWP / Parking (read-only probe)]\n";
+    auto snap = PlatformProbe::capture();
+    std::wcout << PlatformProbe::format_snapshot(snap) << L"\n";
 
     std::wcout << L"[Smart Memory Manager & Cache State]\n";
     auto& mm = MemoryManager::get_instance();
@@ -103,7 +94,9 @@ void show_status() {
                << (total_ram_mb / 1024.0) << L" GB total ("
                << static_cast<uint64_t>(avail_ram_mb) << L" MB available)\n";
     std::wcout << L"  Pressure Limit:  " << Config::get_instance().memory.pressure_threshold_percent << L"% (Trigger threshold)\n";
-    std::wcout << L"  Standby Purge:   " << ((is_admin || is_system) ? L"Full Purge (Elevated NTAPI Class 80)" : L"Low-Priority Fallback (Unprivileged)") << L"\n";
+    std::wcout << L"  Standby Purge:   auto="
+               << (Config::get_instance().memory.enable_standby_purge ? L"ON at RAM>=85%" : L"OFF")
+               << L"  (" << ((is_admin || is_system) ? L"elevated NTAPI" : L"unprivileged") << L")\n";
     std::wcout << L"  Stutter Guard:   ACTIVE (Active PID & 10s grace period protected)\n";
     std::wcout << L"\n";
 
@@ -116,7 +109,10 @@ void show_status() {
     std::wcout << L"  CPU Hogs Detected:    " << pg_stats.cpu_hogs_detected << L"\n";
     std::wcout << L"  Mem Leaks Detected:   " << pg_stats.mem_leaks_detected << L"\n";
     std::wcout << L"  Active Throttles:     " << throttles.size() << L"\n";
-    std::wcout << L"  EcoQoS Governor:      ARMED (background processes auto-throttled)\n";
+    std::wcout << L"  HighQoS (foreground): " << pg_stats.highqos_active << L"\n";
+    std::wcout << L"  EcoQoS (background):  " << pg_stats.ecoqos_active << L"\n";
+    std::wcout << L"  EcoQoS Governor:      ARMED (fg HighQoS, bg EcoQoS)\n";
+    std::wcout << L"  OS CPU reserve:       1 physical core (non-system processes kept off it)\n";
     std::wcout << L"\n";
 }
 } // namespace surface_optimizer
@@ -150,6 +146,15 @@ int wmain(int argc, wchar_t* argv[]) {
     if (arg == L"--status") {
         show_status();
         return 0;
+    }
+
+    if (arg == L"--foreground-watch") {
+        DWORD parent = (argc >= 3) ? static_cast<DWORD>(wcstoul(argv[2], nullptr, 10)) : 0;
+        if (parent == 0) {
+            std::wcerr << L"Error: --foreground-watch requires parent PID.\n";
+            return 1;
+        }
+        return Service::run_foreground_watch(parent);
     }
 
     if (arg == L"--install") {
@@ -235,11 +240,22 @@ int wmain(int argc, wchar_t* argv[]) {
         print_header();
         std::wcout << L"Running native performance and dynamic governor verification...\n";
         auto& pm = PowerManager::get_instance();
+        auto snap = PlatformProbe::capture();
+        std::wcout << PlatformProbe::format_snapshot(snap);
+        auto lat = PlatformProbe::measure_epp_apply_latency();
+        if (lat.ok) {
+            std::wcout << L"  [OK] EPP apply latency: " << std::fixed << std::setprecision(1)
+                       << lat.activate_us << L" us (" << lat.from_epp << L"% -> " << lat.to_epp << L"%)\n";
+        } else {
+            std::wcout << L"  [WARN] EPP apply latency measurement failed\n";
+        }
         if (pm.initialize()) {
             std::wcout << L"  [OK] Active Scheme: " << pm.get_active_scheme_name() << L"\n";
             std::wcout << L"  [OK] Power Source:  " << (pm.get_current_power_source() == PowerSource::AC ? L"AC" : L"DC") << L"\n";
             std::wcout << L"  [OK] Current EPP:   " << pm.get_current_epp() << L"%\n";
             std::wcout << L"  [OK] Boost Mode:    " << pm.get_current_boost_mode() << L"\n";
+            std::wcout << L"  [OK] Fast-ramp:     " << (pm.is_fast_ramp_active() ? L"active" : L"idle")
+                       << L" poll=" << pm.desired_poll_interval_ms() << L"ms\n";
             pm.shutdown();
         }
         auto& mm = MemoryManager::get_instance();

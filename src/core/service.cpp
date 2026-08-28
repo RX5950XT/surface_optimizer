@@ -10,6 +10,8 @@
 #include <chrono>
 #include <thread>
 #include <sddl.h>
+#include <wtsapi32.h>
+#include <cstring>
 
 #ifndef PBT_POWERSETTINGCHANGE
 #define PBT_POWERSETTINGCHANGE 0x8013
@@ -92,7 +94,7 @@ void Service::update_service_status(DWORD current_state, DWORD win32_exit_code, 
     if (current_state == SERVICE_START_PENDING) {
         m_service_status.dwControlsAccepted = 0;
     } else if (current_state == SERVICE_RUNNING) {
-        m_service_status.dwControlsAccepted = SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN | SERVICE_ACCEPT_POWEREVENT;
+        m_service_status.dwControlsAccepted = SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN | SERVICE_ACCEPT_POWEREVENT | SERVICE_ACCEPT_SESSIONCHANGE;
     } else if (current_state == SERVICE_STOPPED || current_state == SERVICE_STOP_PENDING) {
         m_service_status.dwControlsAccepted = 0;
     }
@@ -181,6 +183,263 @@ void Service::process_power_broadcast_setting(PPOWERBROADCAST_SETTING setting) {
     }
 }
 
+void Service::arm_timer(HANDLE hTimer, DWORD period_ms) {
+    if (!hTimer || period_ms == 0) return;
+    LARGE_INTEGER due{};
+    due.QuadPart = -static_cast<LONGLONG>(period_ms) * 10000LL;
+    SetWaitableTimer(hTimer, &due, static_cast<LONG>(period_ms), nullptr, nullptr, FALSE);
+}
+
+bool Service::create_fg_ipc() {
+    SECURITY_DESCRIPTOR sd{};
+    InitializeSecurityDescriptor(&sd, SECURITY_DESCRIPTOR_REVISION);
+    SetSecurityDescriptorDacl(&sd, TRUE, nullptr, FALSE);
+    SECURITY_ATTRIBUTES sa{};
+    sa.nLength = sizeof(sa);
+    sa.lpSecurityDescriptor = &sd;
+    sa.bInheritHandle = FALSE;
+
+    m_fg_map = CreateFileMappingW(INVALID_HANDLE_VALUE, &sa, PAGE_READWRITE, 0, sizeof(SharedFgState), FG_MAP_NAME);
+    if (!m_fg_map) {
+        LOG_WARN(L"Failed to create foreground IPC mapping: " + Utils::get_last_error_message());
+        return false;
+    }
+    m_fg_view = static_cast<SharedFgState*>(MapViewOfFile(m_fg_map, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(SharedFgState)));
+    if (m_fg_view) {
+        *m_fg_view = SharedFgState{};
+    }
+    m_fg_event = CreateEventW(&sa, FALSE, FALSE, FG_EVENT_NAME);
+    if (!m_fg_event) {
+        LOG_WARN(L"Failed to create foreground IPC event: " + Utils::get_last_error_message());
+        return false;
+    }
+    return m_fg_view != nullptr;
+}
+
+void Service::close_fg_ipc() {
+    stop_session_watch();
+    if (m_fg_view) {
+        UnmapViewOfFile(m_fg_view);
+        m_fg_view = nullptr;
+    }
+    if (m_fg_map) {
+        CloseHandle(m_fg_map);
+        m_fg_map = nullptr;
+    }
+    if (m_fg_event) {
+        CloseHandle(m_fg_event);
+        m_fg_event = nullptr;
+    }
+}
+
+void Service::start_session_watch() {
+    if (m_fg_watch_process) {
+        DWORD code = 0;
+        if (GetExitCodeProcess(m_fg_watch_process, &code) && code == STILL_ACTIVE) {
+            return;
+        }
+        CloseHandle(m_fg_watch_process);
+        m_fg_watch_process = nullptr;
+    }
+
+    DWORD session = WTSGetActiveConsoleSessionId();
+    if (session == 0xFFFFFFFF) {
+        return;
+    }
+    HANDLE hToken = nullptr;
+    if (!WTSQueryUserToken(session, &hToken)) {
+        LOG_DEBUG(L"WTSQueryUserToken failed (no interactive session yet)");
+        return;
+    }
+
+    std::wstring exe = Utils::get_executable_path();
+    std::wstring cmd = L"\"" + exe + L"\" --foreground-watch " + std::to_wstring(GetCurrentProcessId());
+    std::vector<wchar_t> cmd_buf(cmd.begin(), cmd.end());
+    cmd_buf.push_back(L'\0');
+
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    si.lpDesktop = const_cast<LPWSTR>(L"winsta0\\default");
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    PROCESS_INFORMATION pi{};
+
+    BOOL ok = CreateProcessAsUserW(
+        hToken,
+        exe.c_str(),
+        cmd_buf.data(),
+        nullptr,
+        nullptr,
+        FALSE,
+        CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
+        nullptr,
+        nullptr,
+        &si,
+        &pi
+    );
+    CloseHandle(hToken);
+    if (!ok) {
+        LOG_WARN(L"Failed to start session foreground watch: " + Utils::get_last_error_message());
+        return;
+    }
+    CloseHandle(pi.hThread);
+    m_fg_watch_process = pi.hProcess;
+    LOG_INFO(L"Started user-session foreground watch PID=" + std::to_wstring(pi.dwProcessId));
+}
+
+void Service::stop_session_watch() {
+    if (!m_fg_watch_process) return;
+    TerminateProcess(m_fg_watch_process, 0);
+    WaitForSingleObject(m_fg_watch_process, 2000);
+    CloseHandle(m_fg_watch_process);
+    m_fg_watch_process = nullptr;
+}
+
+bool Service::consume_fg_state() {
+    if (!m_fg_view) return false;
+    uint32_t pid = m_fg_view->pid;
+    uint32_t idle_ms = m_fg_view->last_input_idle_ms;
+    PowerManager::get_instance().set_last_input_idle_ms(idle_ms);
+    if (pid != 0 && pid != m_last_seen_fg_pid) {
+        m_last_seen_fg_pid = pid;
+        std::wstring name = m_fg_view->image_name;
+        if (name.empty()) {
+            name = Utils::get_process_name_by_pid(pid);
+        }
+        if (m_foreground_callback) {
+            m_foreground_callback(pid, name);
+        }
+        return true;
+    }
+    return false;
+}
+
+HWND Service::create_message_window() {
+    WNDCLASSEXW wc{};
+    wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = Service::power_sink_wndproc;
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.lpszClassName = L"SurfaceOptimizerPowerSink";
+    RegisterClassExW(&wc);
+    return CreateWindowExW(0, wc.lpszClassName, L"", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, wc.hInstance, nullptr);
+}
+
+LRESULT CALLBACK Service::power_sink_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    if (msg == WM_POWERBROADCAST && wParam == PBT_POWERSETTINGCHANGE && lParam) {
+        Service::get_instance().process_power_broadcast_setting(reinterpret_cast<PPOWERBROADCAST_SETTING>(lParam));
+        return TRUE;
+    }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+namespace {
+Service::SharedFgState* g_watch_view = nullptr;
+HANDLE g_watch_event = nullptr;
+
+void publish_watch_state(DWORD pid) {
+    if (!g_watch_view) return;
+    LASTINPUTINFO info{};
+    info.cbSize = sizeof(info);
+    uint32_t idle_ms = 0xFFFFFFFFu;
+    if (GetLastInputInfo(&info)) {
+        idle_ms = GetTickCount() - info.dwTime;
+    }
+    g_watch_view->pid = pid;
+    g_watch_view->last_input_idle_ms = idle_ms;
+    std::wstring name = Utils::get_process_name_by_pid(pid);
+    size_t ncopy = name.size();
+    if (ncopy > 63) ncopy = 63;
+    memcpy(g_watch_view->image_name, name.c_str(), ncopy * sizeof(wchar_t));
+    g_watch_view->image_name[ncopy] = L'\0';
+    g_watch_view->seq += 1;
+    if (g_watch_event) {
+        SetEvent(g_watch_event);
+    }
+}
+} // namespace
+
+void CALLBACK Service::watch_win_event_proc(HWINEVENTHOOK /*hook*/, DWORD event, HWND hwnd, LONG id_object, LONG id_child, DWORD /*event_thread*/, DWORD /*event_time*/) {
+    if (event != EVENT_SYSTEM_FOREGROUND || id_object != OBJID_WINDOW || id_child != INDEXID_CONTAINER) return;
+    if (!hwnd || !IsWindow(hwnd)) return;
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    if (pid != 0) {
+        publish_watch_state(pid);
+    }
+}
+
+int Service::run_foreground_watch(DWORD parent_pid) {
+    HANDLE hMap = OpenFileMappingW(FILE_MAP_ALL_ACCESS, FALSE, FG_MAP_NAME);
+    HANDLE hEvt = OpenEventW(EVENT_MODIFY_STATE, FALSE, FG_EVENT_NAME);
+    if (!hMap || !hEvt) {
+        return 1;
+    }
+    g_watch_view = static_cast<SharedFgState*>(MapViewOfFile(hMap, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(SharedFgState)));
+    g_watch_event = hEvt;
+    if (!g_watch_view) {
+        return 2;
+    }
+
+    HWINEVENTHOOK hook = SetWinEventHook(
+        EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND,
+        nullptr, watch_win_event_proc, 0, 0,
+        WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS
+    );
+
+    HANDLE hParent = OpenProcess(SYNCHRONIZE, FALSE, parent_pid);
+    HANDLE hTimer = CreateWaitableTimerW(nullptr, FALSE, nullptr);
+    if (hTimer) {
+        LARGE_INTEGER due{};
+        due.QuadPart = -1000000LL;
+        SetWaitableTimer(hTimer, &due, 100, nullptr, nullptr, FALSE);
+    }
+
+    HANDLE waits[2];
+    DWORD n = 0;
+    DWORD parent_index = 0xFFFFFFFF;
+    if (hParent) {
+        parent_index = n;
+        waits[n++] = hParent;
+    }
+    if (hTimer) {
+        waits[n++] = hTimer;
+    }
+
+    bool running = true;
+    while (running) {
+        DWORD wr = MsgWaitForMultipleObjectsEx(n, waits, INFINITE, QS_ALLINPUT, MWMO_ALERTABLE);
+        if (parent_index != 0xFFFFFFFF && wr == WAIT_OBJECT_0 + parent_index) {
+            break;
+        }
+        HWND fg = GetForegroundWindow();
+        DWORD pid = 0;
+        if (fg) GetWindowThreadProcessId(fg, &pid);
+        if (pid) publish_watch_state(pid);
+
+        if (wr == WAIT_OBJECT_0 + n) {
+            MSG msg;
+            while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+                if (msg.message == WM_QUIT) {
+                    running = false;
+                    break;
+                }
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        }
+    }
+
+    if (hook) UnhookWinEvent(hook);
+    if (hTimer) CloseHandle(hTimer);
+    if (hParent) CloseHandle(hParent);
+    UnmapViewOfFile(g_watch_view);
+    CloseHandle(hMap);
+    CloseHandle(hEvt);
+    g_watch_view = nullptr;
+    g_watch_event = nullptr;
+    return 0;
+}
+
 void CALLBACK Service::win_event_proc(HWINEVENTHOOK /*hook*/, DWORD event, HWND hwnd, LONG id_object, LONG id_child, DWORD /*event_thread*/, DWORD /*event_time*/) {
     if (event == EVENT_SYSTEM_FOREGROUND && id_object == OBJID_WINDOW && id_child == INDEXID_CONTAINER) {
         if (hwnd && IsWindow(hwnd)) {
@@ -251,6 +510,14 @@ DWORD WINAPI Service::service_handler_ex(DWORD control, DWORD event_type, LPVOID
             }
             return NO_ERROR;
 
+        case SERVICE_CONTROL_SESSIONCHANGE:
+            if (event_type == WTS_SESSION_LOGON || event_type == WTS_CONSOLE_CONNECT || event_type == WTS_SESSION_UNLOCK) {
+                svc.start_session_watch();
+            } else if (event_type == WTS_SESSION_LOGOFF || event_type == WTS_CONSOLE_DISCONNECT) {
+                svc.stop_session_watch();
+            }
+            return NO_ERROR;
+
         case SERVICE_CONTROL_INTERROGATE:
             return NO_ERROR;
 
@@ -304,17 +571,16 @@ int Service::run_daemon_loop(bool is_interactive) {
     // 4. Create waitable timer for periodic housekeeping
     auto& config = Config::get_instance();
     HANDLE hTimer = CreateWaitableTimerW(nullptr, FALSE, nullptr);
+    DWORD current_period_ms = config.power.busy_poll_interval_ms;
     if (hTimer) {
-        LARGE_INTEGER due_time;
-        due_time.QuadPart = -10000000LL; // 1 second initial delay
-        DWORD period_ms = config.daemon.housekeeping_interval_ac_ms;
-        SetWaitableTimer(hTimer, &due_time, period_ms, nullptr, nullptr, FALSE);
+        arm_timer(hTimer, current_period_ms);
     }
 
     // 5. Initialize Subsystems (M2: PowerManager, M3: MemoryManager)
     PowerManager::get_instance().initialize();
     MemoryManager::get_instance().initialize();
     ProcessGuardian::get_instance().initialize();
+    ProcessGuardian::get_instance().enable_enforcement();
 
     set_power_change_callback([](bool is_ac, uint32_t battery_percent) {
         PowerManager::get_instance().on_power_source_changed(is_ac ? PowerSource::AC : PowerSource::Battery);
@@ -327,20 +593,10 @@ int Service::run_daemon_loop(bool is_interactive) {
         ProcessGuardian::get_instance().on_foreground_process_changed(pid, image_name);
     });
 
-    set_housekeeping_callback([this]() {
-        PowerManager::get_instance().on_housekeeping();
-        MemoryManager::get_instance().on_housekeeping(
-            MemoryManager::get_instance().get_current_foreground_pid(),
-            m_current_is_ac
-        );
-        ProcessGuardian::get_instance().on_housekeeping(
-            MemoryManager::get_instance().get_current_foreground_pid()
-        );
-    });
+    create_fg_ipc();
 
     // 6. Register notifications
     if (is_interactive) {
-        // In interactive mode, install WinEvent hook for foreground focus
         m_foreground_hook = SetWinEventHook(
             EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND,
             nullptr, win_event_proc,
@@ -352,9 +608,13 @@ int Service::run_daemon_loop(bool is_interactive) {
         } else {
             LOG_INFO(L"Zero-polling WinEvent hook installed for instant foreground focus tracking.");
         }
+        m_msg_window = create_message_window();
+        if (m_msg_window) {
+            register_power_notifications(m_msg_window, false);
+        }
     } else {
-        // In SCM mode, register power setting notification on service status handle
         register_power_notifications(m_service_status_handle, true);
+        start_session_watch();
     }
 
     m_is_running = true;
@@ -364,9 +624,12 @@ int Service::run_daemon_loop(bool is_interactive) {
 
     LOG_INFO(L"SurfaceOptimizer daemon core loop active. Running state: ACTIVE.");
 
-    // Event-driven message/wait loop
-    HANDLE wait_handles[2] = { m_stop_event, hTimer };
-    DWORD num_handles = (hTimer != nullptr) ? 2 : 1;
+    HANDLE wait_handles[3] = { m_stop_event, hTimer, m_fg_event };
+    DWORD num_handles = 1;
+    if (hTimer) num_handles = 2;
+    if (m_fg_event) num_handles = (hTimer ? 3 : 2);
+
+    auto last_slow = std::chrono::steady_clock::now();
 
     while (!m_stop_requested.load()) {
         DWORD wait_result = MsgWaitForMultipleObjectsEx(
@@ -378,16 +641,35 @@ int Service::run_daemon_loop(bool is_interactive) {
         );
 
         if (wait_result == WAIT_OBJECT_0) {
-            // Stop event signaled
             LOG_INFO(L"Stop event signaled. Initiating clean termination...");
             break;
-        } else if (wait_result == WAIT_OBJECT_0 + 1) {
-            // Waitable timer fired - run periodic housekeeper
-            if (m_housekeeping_callback) {
-                m_housekeeping_callback();
+        } else if (hTimer && wait_result == WAIT_OBJECT_0 + 1) {
+            consume_fg_state();
+            PowerManager::get_instance().on_housekeeping();
+
+            DWORD want = PowerManager::get_instance().desired_poll_interval_ms();
+            if (want != current_period_ms && want != 0) {
+                current_period_ms = want;
+                arm_timer(hTimer, current_period_ms);
             }
+
+            auto now = std::chrono::steady_clock::now();
+            DWORD slow_ms = m_current_is_ac
+                ? config.daemon.housekeeping_interval_ac_ms
+                : config.daemon.housekeeping_interval_dc_ms;
+            if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_slow).count() >= static_cast<int64_t>(slow_ms)) {
+                last_slow = now;
+                MemoryManager::get_instance().on_housekeeping(
+                    MemoryManager::get_instance().get_current_foreground_pid(),
+                    m_current_is_ac
+                );
+                ProcessGuardian::get_instance().on_housekeeping(
+                    MemoryManager::get_instance().get_current_foreground_pid()
+                );
+            }
+        } else if (m_fg_event && wait_result == WAIT_OBJECT_0 + (hTimer ? 2 : 1)) {
+            consume_fg_state();
         } else if (wait_result == WAIT_OBJECT_0 + num_handles) {
-            // Windows messages pending (for WinEvent hooks & power messages)
             MSG msg;
             while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
                 if (msg.message == WM_QUIT) {
@@ -412,6 +694,11 @@ int Service::run_daemon_loop(bool is_interactive) {
     }
 
     unregister_power_notifications();
+    if (m_msg_window) {
+        DestroyWindow(m_msg_window);
+        m_msg_window = nullptr;
+    }
+    close_fg_ipc();
 
     if (hTimer) {
         CancelWaitableTimer(hTimer);

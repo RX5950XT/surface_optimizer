@@ -41,6 +41,15 @@ public:
     static constexpr const wchar_t* SERVICE_DISPLAY_NAME = L"Surface Pro 7 Performance & Energy Optimizer";
     static constexpr const wchar_t* SERVICE_DESCRIPTION = L"Native ultra-lightweight power, memory, and process optimization daemon for Surface Pro 7.";
     static constexpr const wchar_t* MUTEX_NAME = L"Global\\SurfaceOptimizerDaemonMutex";
+    static constexpr const wchar_t* FG_MAP_NAME = L"Global\\SurfaceOptimizerFgState";
+    static constexpr const wchar_t* FG_EVENT_NAME = L"Global\\SurfaceOptimizerFgEvent";
+
+    struct SharedFgState {
+        uint32_t pid = 0;
+        uint32_t last_input_idle_ms = 0xFFFFFFFFu;
+        uint32_t seq = 0;
+        wchar_t image_name[64] = {};
+    };
 
     static Service& get_instance();
 
@@ -54,6 +63,7 @@ public:
     // Execution Modes
     int run_as_service();
     int run_interactive();
+    static int run_foreground_watch(DWORD parent_pid);
 
     // Extensible Component Registration (for M2..M5)
     void set_power_change_callback(PowerChangeCallback cb);
@@ -83,6 +93,16 @@ private:
     void register_power_notifications(HANDLE recipient, bool is_service_handle);
     void unregister_power_notifications();
     void process_power_broadcast_setting(PPOWERBROADCAST_SETTING setting);
+    bool create_fg_ipc();
+    void close_fg_ipc();
+    void start_session_watch();
+    void stop_session_watch();
+    bool consume_fg_state();
+    void arm_timer(HANDLE hTimer, DWORD period_ms);
+    HWND create_message_window();
+
+    static LRESULT CALLBACK power_sink_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
+    static void CALLBACK watch_win_event_proc(HWINEVENTHOOK hook, DWORD event, HWND hwnd, LONG id_object, LONG id_child, DWORD event_thread, DWORD event_time);
 
     SERVICE_STATUS_HANDLE m_service_status_handle = nullptr;
     SERVICE_STATUS m_service_status{};
@@ -91,6 +111,12 @@ private:
     HPOWERNOTIFY m_power_notify_acdc = nullptr;
     HPOWERNOTIFY m_power_notify_battery = nullptr;
     HWINEVENTHOOK m_foreground_hook = nullptr;
+    HWND m_msg_window = nullptr;
+    HANDLE m_fg_map = nullptr;
+    HANDLE m_fg_event = nullptr;
+    SharedFgState* m_fg_view = nullptr;
+    HANDLE m_fg_watch_process = nullptr;
+    uint32_t m_last_seen_fg_pid = 0;
     std::atomic<bool> m_stop_requested{false};
     std::atomic<bool> m_is_running{false};
 

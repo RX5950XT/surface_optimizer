@@ -37,6 +37,9 @@ struct GuardianStats {
     size_t throttled_count = 0;
     size_t skipped_allowlist = 0;
     size_t skipped_foreground = 0;
+    size_t highqos_active = 0;
+    size_t ecoqos_active = 0;
+    size_t affinity_restricted = 0;
 };
 
 class ProcessGuardian {
@@ -44,6 +47,7 @@ public:
     static ProcessGuardian& get_instance();
 
     virtual bool initialize();
+    virtual void enable_enforcement();
     virtual void shutdown();
 
     // Core housekeeping entry point (called from Service event loop)
@@ -70,8 +74,19 @@ private:
     int64_t compute_ws_delta(const ProcessSnapshot& prev, const ProcessSnapshot& curr) const;
 
     // Throttling actions
+    bool set_execution_speed_throttle(uint32_t pid, bool enable_eco) const;
     bool apply_eco_qos(uint32_t pid);
+    bool apply_high_qos(uint32_t pid);
     bool demote_priority(uint32_t pid);
+    void apply_foreground_background_qos(
+        const std::unordered_map<uint32_t, ProcessSnapshot>& curr_map,
+        GuardianStats& stats);
+    void discover_os_reserve_masks();
+    bool restrict_off_os_core(uint32_t pid);
+    void apply_os_cpu_reserve(
+        const std::unordered_map<uint32_t, ProcessSnapshot>& curr_map,
+        GuardianStats& stats);
+    void restore_restricted_affinity();
     void cleanup_stale_throttles();
 
     // Protection checks
@@ -79,6 +94,10 @@ private:
 
     mutable std::mutex m_mutex;
     bool m_initialized = false;
+    bool m_enforce = false;
+    DWORD_PTR m_os_core_mask = 0;
+    DWORD_PTR m_user_affinity_mask = 0;
+    std::unordered_map<uint32_t, DWORD_PTR> m_affinity_original;
 
     // Previous snapshot for delta computation
     std::unordered_map<uint32_t, ProcessSnapshot> m_prev_snapshots;
@@ -89,6 +108,9 @@ private:
 
     // Active throttle records
     std::unordered_map<uint32_t, ThrottleRecord> m_throttled_pids;
+
+    // Last applied execution-speed QoS (true = EcoQoS, false = HighQoS)
+    std::unordered_map<uint32_t, bool> m_qos_eco;
 
     // Foreground PID
     uint32_t m_current_foreground_pid = 0;

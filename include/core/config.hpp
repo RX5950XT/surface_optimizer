@@ -15,13 +15,20 @@ struct PowerConfig {
     uint32_t battery_saver_threshold_percent = 20;
     uint32_t ac_boost_mode = 2; // 0=Disabled, 2=Aggressive
     uint32_t dc_boost_mode = 0; // 0=Disabled, 2=Aggressive
-    uint32_t fast_ramp_duration_ms = 3000;
+    uint32_t fast_ramp_duration_ms = 3000; // fallback when process times cannot be sampled
+    uint32_t busy_poll_interval_ms = 100;
+    uint32_t idle_poll_interval_ms = 250;
+    uint32_t idle_hysteresis_ms = 250;
+    uint32_t last_input_hold_ms = 1000;
+    uint32_t boost_grace_ms = 200;
+    double busy_cpu_percent_threshold = 8.0;
+    double busy_gpu_percent_threshold = 15.0;
 };
 
 struct MemoryConfig {
     uint32_t pressure_threshold_percent = 75;
     uint32_t trim_interval_seconds = 60;
-    bool enable_standby_purge = true;
+    bool enable_standby_purge = false;
     bool trim_idle_processes_on_ac = true;
     bool trim_idle_processes_on_dc = true;
 };

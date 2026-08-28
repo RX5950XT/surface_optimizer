@@ -1,6 +1,6 @@
 CXX = C:/msys64/ucrt64/bin/g++.exe
 CXXFLAGS = -std=c++20 -O3 -flto -municode -Wall -Wextra -Iinclude
-LDFLAGS = -static -s -lpowrprof -lpsapi -ladvapi32 -luser32 -lkernel32
+LDFLAGS = -static -s -lpowrprof -lpsapi -ladvapi32 -luser32 -lkernel32 -lwtsapi32 -lpdh
 
 SRCDIR = src
 INCDIR = include
