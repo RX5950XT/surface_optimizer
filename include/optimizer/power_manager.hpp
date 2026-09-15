@@ -6,6 +6,8 @@
 #include <cstdint>
 #include <chrono>
 #include <mutex>
+#include <array>
+#include "optimizer/burst_policy.hpp"
 
 namespace surface_optimizer {
 
@@ -80,6 +82,7 @@ private:
     void restore_baseline();
     void sample_and_update_burst_hold();
     bool sample_process(uint32_t pid, uint64_t& cpu_100ns, uint64_t& io_ops) const;
+    void record_hold_reason(HoldReason reason, std::chrono::steady_clock::time_point now);
 
     mutable std::mutex m_mutex;
     GUID m_active_scheme_guid{};
@@ -125,6 +128,9 @@ private:
     uint64_t m_prev_sys_kernel = 0;
     uint64_t m_prev_sys_user = 0;
     bool m_have_system_sample = false;
+
+    std::array<uint32_t, static_cast<size_t>(HoldReason::Count)> m_hold_reason_counts{};
+    std::chrono::steady_clock::time_point m_hold_stats_since{};
 
     uint32_t m_last_input_idle_ms = UINT32_MAX;
     bool m_last_input_from_session = false;

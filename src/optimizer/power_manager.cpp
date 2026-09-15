@@ -305,7 +305,8 @@ void PowerManager::evaluate_and_apply_governor(bool force_apply) {
         target_profile = PerformanceProfile::InstantBoost;
         target_epp = ac ? config.power.ac_epp_active : config.power.dc_epp_active;
         target_boost = ac ? config.power.ac_boost_mode : 2;
-        target_min = 100;
+        // AC: EPP 0 lets HWP ramp in ~1 ms, so pinning Min=100% only burns power between bursts.
+        target_min = ac ? config.power.ac_min_active_percent : 100;
         target_unpark = 100;
     } else if (ac) {
         target_profile = PerformanceProfile::HighPerformance;
@@ -422,7 +423,6 @@ void PowerManager::sample_and_update_burst_hold() {
 
     uint32_t idle_ms = m_last_input_from_session ? m_last_input_idle_ms : query_last_input_idle_ms();
     in.recent_input = (idle_ms != UINT32_MAX && idle_ms <= config.power.last_input_hold_ms);
-    in.gpu_busy = g_gpu.is_busy(config.power.busy_gpu_percent_threshold);
 
     if (m_last_foreground_pid != 0) {
         uint64_t cpu = 0, io = 0;
@@ -433,7 +433,10 @@ void PowerManager::sample_and_update_burst_hold() {
                 if (sample_elapsed < 1) sample_elapsed = 1;
                 double pct = cpu_percent_one_core(cpu - m_prev_cpu_100ns, static_cast<uint64_t>(sample_elapsed));
                 in.cpu_busy = pct >= config.power.busy_cpu_percent_threshold;
-                in.io_busy = io > m_prev_io_ops;
+                // Electron apps idle at 150-800 ops/s (pipe IPC), so "any IO" kept boost on 73% of the time.
+                in.io_busy = io > m_prev_io_ops &&
+                    ops_per_second(io - m_prev_io_ops, static_cast<uint64_t>(sample_elapsed)) >=
+                        config.power.busy_io_ops_per_sec_threshold;
             } else {
                 in.cpu_busy = true; // first sample: stay boosted until we have a delta
             }
@@ -465,7 +468,13 @@ void PowerManager::sample_and_update_burst_hold() {
         }
     }
 
-    bool hold = should_hold_boost(in);
+    if (needs_gpu_sample(in)) {
+        in.gpu_busy = g_gpu.is_busy(config.power.busy_gpu_percent_threshold);
+    }
+
+    const HoldReason reason = hold_reason(in);
+    record_hold_reason(reason, now);
+    bool hold = reason != HoldReason::None;
     if (hold) {
         m_quiet_timing = false;
         if (!m_is_fast_ramp_active) {
@@ -478,11 +487,33 @@ void PowerManager::sample_and_update_burst_hold() {
             m_quiet_since = now;
         }
         auto quiet_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - m_quiet_since).count();
-        if (quiet_ms >= static_cast<int64_t>(config.power.idle_hysteresis_ms) && m_is_fast_ramp_active) {
+        const uint32_t hysteresis_ms = (m_current_power_source == PowerSource::AC)
+            ? config.power.ac_idle_hysteresis_ms
+            : config.power.idle_hysteresis_ms;
+        if (quiet_ms >= static_cast<int64_t>(hysteresis_ms) && m_is_fast_ramp_active) {
             m_is_fast_ramp_active = false;
             LOG_DEBUG(L"PowerManager: burst quiet for " + std::to_wstring(quiet_ms) + L"ms, dropping to idle");
         }
     }
+}
+
+// Per-minute INFO summary of why boost was held, counted per poll.
+void PowerManager::record_hold_reason(HoldReason reason, std::chrono::steady_clock::time_point now) {
+    ++m_hold_reason_counts[static_cast<size_t>(reason)];
+    if (m_hold_stats_since.time_since_epoch().count() == 0) {
+        m_hold_stats_since = now;
+    }
+    if (now - m_hold_stats_since < std::chrono::minutes(1)) {
+        return;
+    }
+    static const wchar_t* names[] = { L"idle", L"grace", L"input", L"gpu", L"cpu", L"io", L"system", L"fallback" };
+    std::wstring line = L"Burst hold polls (60s):";
+    for (size_t i = 0; i < m_hold_reason_counts.size(); ++i) {
+        line += L" " + std::wstring(names[i]) + L"=" + std::to_wstring(m_hold_reason_counts[i]);
+    }
+    LOG_INFO(line);
+    m_hold_reason_counts.fill(0);
+    m_hold_stats_since = now;
 }
 
 void PowerManager::on_housekeeping() {

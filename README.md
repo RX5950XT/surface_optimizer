@@ -202,9 +202,12 @@ make -j4
 | | `dc_epp_idle` | 80 | 電池閒置時的 EPP |
 | | `dc_boost_mode` | 0 | 電池閒置時 Turbo Boost（0=關, 2=激進） |
 | | `fast_ramp_duration_ms` | 3000 | 讀不到前景行程時的後備維持時間 |
-| | `busy_poll_interval_ms` | 100 | 爆發期間檢查間隔 |
-| | `idle_hysteresis_ms` | 250 | 安靜多久才降頻 |
+| | `busy_poll_interval_ms` | 250 | 爆發期間檢查間隔 |
+| | `idle_hysteresis_ms` | 250 | 電池時安靜多久才降頻 |
+| | `ac_idle_hysteresis_ms` | 1000 | 插電時安靜多久才降頻（太短的閒置省不到切換方案的成本） |
+| | `ac_min_active_percent` | 5 | 插電爆發時的 Min processor state（%）；要最快反應可改回 100 |
 | | `busy_gpu_percent_threshold` | 15.0 | GPU 還在畫就維持爆發（%） |
+| | `busy_io_ops_per_sec_threshold` | 1000.0 | 前台每秒 IO 次數超過才算忙（閒置的 Electron 程式就有 150～800） |
 | | `battery_saver_threshold_percent` | 20 | 低電量 Battery Saver 觸發閾值 |
 | `[memory]` | `pressure_threshold_percent` | 75 | 記憶體修剪觸發閾值（%） |
 | | `trim_interval_seconds` | 60 | 修剪冷卻時間（秒） |
@@ -213,7 +216,7 @@ make -j4
 | | `cpu_hog_sustain_seconds` | 30 | 持續超標多久才降級（秒） |
 | | `enable_eco_qos` | true | 前台 HighQoS、背景 EcoQoS |
 | | `allowlist` | *見檔案* | 白名單進程（永不降級） |
-| `[daemon]` | `housekeeping_interval_ac_ms` | 5000 | 插電時巡查間隔（ms） |
+| `[daemon]` | `housekeeping_interval_ac_ms` | 15000 | 插電時巡查間隔（ms） |
 | | `housekeeping_interval_dc_ms` | 15000 | 電池時巡查間隔（ms） |
 | | `log_level` | INFO | 日誌等級（DEBUG / INFO / WARN / ERROR） |
 

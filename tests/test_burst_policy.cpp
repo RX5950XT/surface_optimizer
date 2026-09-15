@@ -5,9 +5,13 @@
 #include <cstdlib>
 
 using surface_optimizer::BurstHoldInput;
+using surface_optimizer::HoldReason;
+using surface_optimizer::hold_reason;
+using surface_optimizer::needs_gpu_sample;
 using surface_optimizer::affinity_uses_os_core;
 using surface_optimizer::cpu_percent_one_core;
 using surface_optimizer::is_memory_growth_suspicious;
+using surface_optimizer::ops_per_second;
 using surface_optimizer::should_hold_boost;
 using surface_optimizer::should_reserve_os_core;
 using surface_optimizer::should_restrict_off_os_core;
@@ -30,6 +34,9 @@ int main() {
            "8ms CPU in 100ms is ~8% of one core");
     expect(cpu_percent_one_core(0, 1000000) == 0.0, "zero delta is 0%");
     expect(cpu_percent_one_core(1, 0) == 0.0, "zero elapsed does not divide by zero");
+
+    expect(ops_per_second(50, 2500000) == 200.0, "50 ops in 250ms is 200 ops/s");
+    expect(ops_per_second(1, 0) == 0.0, "zero elapsed ops rate does not divide by zero");
 
     expect(system_busy_percent(800000, 1000000, 0) > 19.0 && system_busy_percent(800000, 1000000, 0) < 21.0,
            "kernel=100 idle=80 user=0 is 20% busy");
@@ -90,6 +97,19 @@ int main() {
     in.elapsed_ms = 4000;
     in.gpu_busy = true;
     expect(should_hold_boost(in), "GPU busy holds after fallback window");
+
+    BurstHoldInput g{};
+    g.elapsed_ms = 500;
+    g.sampled = true;
+    expect(needs_gpu_sample(g), "idle foreground needs GPU sample");
+    g.cpu_busy = true;
+    expect(!needs_gpu_sample(g) && hold_reason(g) == HoldReason::Cpu, "CPU busy skips GPU sample");
+    g.cpu_busy = false;
+    g.recent_input = true;
+    expect(!needs_gpu_sample(g) && hold_reason(g) == HoldReason::Input, "recent input skips GPU sample");
+    g.recent_input = false;
+    g.elapsed_ms = 50;
+    expect(!needs_gpu_sample(g) && hold_reason(g) == HoldReason::Grace, "grace window skips GPU sample");
 
     expect(should_reserve_os_core(4), "4 physical cores reserve one");
     expect(!should_reserve_os_core(2), "2 physical cores do not reserve");

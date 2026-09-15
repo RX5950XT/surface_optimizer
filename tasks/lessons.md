@@ -14,4 +14,6 @@
 - 清 Standby List 會讓下次開同一批程式更慢。16 GB 預設只修剪 Working Set。
 - GPU 忙碌時 CPU 可能很閒；爆發條件要看 PDH `GPU Engine(*)`，略過 `engtype_idle`。
 - toml 字串若帶引號，讀檔一定要剝掉，否則 log 路徑會變成 `"C:\..."` 寫不進去。
+- 前台「有任何 IO」不能當忙碌訊號：閒置的 Electron（Claude、VoiceInk）靠 pipe IPC 每秒就有 150～800 次 IO，插電時 73% 時間被卡在 EPP 0／Min 100%。要看每秒 IO 次數門檻。
+- `make clean` 會刪根目錄 exe，服務在跑時也刪得掉；要換版先 `make TARGET=build/xxx.exe` 再停服務複製。
 - 發布前要用一般使用者跑 `--status`；Global IPC 的 DACL 除了讀寫，也要允許 `SYNCHRONIZE`，否則服務雖正常但狀態會誤判未啟動。

@@ -47,6 +47,8 @@
 ### 驗證結果
 
 - 2026-08-29 發布版：完整編譯成功、`test_burst_policy` 30 項通過、`audit_ipc_security.ps1` 通過；一般使用者 `--status` 顯示 daemon RUNNING，系統列 IPC 可讀寫。部署 SHA-256：`69AE630A…C3F05652C`。
+- 2026-09-15：前台 IO 忙碌改成每秒 ≥1000 次（`busy_io_ops_per_sec_threshold`）。修正前插電時全速佔 72.9%、12 天切換 14,698 次。
+- 2026-09-15 插電省電：爆發 Min 改 5%（`ac_min_active_percent`，EPP 0 已夠快）、插電降頻 hysteresis 1000 ms、busy poll 250 ms、插電巡查 15 s；已因輸入／CPU／IO 維持爆發時不查 PDH GPU。每分鐘 INFO log `Burst hold polls (60s)` 記下維持爆發的原因。修正前服務本身約 2.3% 單核。
 - 2026-08-29：服務 + 系統列 helper 私有記憶體 8.3 MB，工作集 23.8 MB。
 - 2026-08-29：30 秒閒置量測服務 1.4892% 單核心、helper 0.1024%；相較修正前服務 2.7913%，下降約 46.7%。
 - 前台升頻：WinEvent 仍是事件驅動；EPP 方案套用實測 ~93 ms；背景 EcoQoS 第一次巡查可套上 100+ 個行程

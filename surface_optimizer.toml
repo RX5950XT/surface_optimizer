@@ -17,13 +17,19 @@ dc_boost_mode = 0
 # Fallback hold when the foreground process cannot be sampled (ms)
 fast_ramp_duration_ms = 3000
 # Burst poll / drop hysteresis
-busy_poll_interval_ms = 100
+busy_poll_interval_ms = 250
 idle_poll_interval_ms = 250
 idle_hysteresis_ms = 250
+# On AC, short idle gaps save less than a ~93 ms scheme switch costs
+ac_idle_hysteresis_ms = 1000
+# Min processor state during boost on AC (EPP 0 already ramps in ~1 ms)
+ac_min_active_percent = 5
 last_input_hold_ms = 1000
 boost_grace_ms = 200
 busy_cpu_percent_threshold = 8.0
 busy_gpu_percent_threshold = 15.0
+# Foreground IO ops/s that counts as busy (idle Electron apps sit at 150-800)
+busy_io_ops_per_sec_threshold = 1000.0
 
 [memory]
 # Pressure threshold to trigger working set & standby trimming (%)
@@ -52,7 +58,7 @@ allowlist = [
 
 [daemon]
 # Housekeeping intervals
-housekeeping_interval_ac_ms = 5000
+housekeeping_interval_ac_ms = 15000
 housekeeping_interval_dc_ms = 15000
 housekeeping_interval_idle_ms = 60000
 

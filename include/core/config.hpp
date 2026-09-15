@@ -16,13 +16,16 @@ struct PowerConfig {
     uint32_t ac_boost_mode = 2; // 0=Disabled, 2=Aggressive
     uint32_t dc_boost_mode = 0; // 0=Disabled, 2=Aggressive
     uint32_t fast_ramp_duration_ms = 3000; // fallback when process times cannot be sampled
-    uint32_t busy_poll_interval_ms = 100;
+    uint32_t busy_poll_interval_ms = 250;
     uint32_t idle_poll_interval_ms = 250;
     uint32_t idle_hysteresis_ms = 250;
+    uint32_t ac_idle_hysteresis_ms = 1000;
+    uint32_t ac_min_active_percent = 5;
     uint32_t last_input_hold_ms = 1000;
     uint32_t boost_grace_ms = 200;
     double busy_cpu_percent_threshold = 8.0;
     double busy_gpu_percent_threshold = 15.0;
+    double busy_io_ops_per_sec_threshold = 1000.0;
 };
 
 struct MemoryConfig {
@@ -47,7 +50,7 @@ struct ProcessGovernorConfig {
 };
 
 struct DaemonConfig {
-    uint32_t housekeeping_interval_ac_ms = 5000;
+    uint32_t housekeeping_interval_ac_ms = 15000;
     uint32_t housekeeping_interval_dc_ms = 15000;
     uint32_t housekeeping_interval_idle_ms = 60000;
     std::wstring log_level = L"INFO";

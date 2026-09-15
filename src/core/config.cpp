@@ -138,10 +138,13 @@ bool Config::load_from_file(const std::wstring& file_path) {
             else if (key == L"busy_poll_interval_ms") power.busy_poll_interval_ms = parse_uint32(val, power.busy_poll_interval_ms);
             else if (key == L"idle_poll_interval_ms") power.idle_poll_interval_ms = parse_uint32(val, power.idle_poll_interval_ms);
             else if (key == L"idle_hysteresis_ms") power.idle_hysteresis_ms = parse_uint32(val, power.idle_hysteresis_ms);
+            else if (key == L"ac_idle_hysteresis_ms") power.ac_idle_hysteresis_ms = parse_uint32(val, power.ac_idle_hysteresis_ms);
+            else if (key == L"ac_min_active_percent") power.ac_min_active_percent = std::min<uint32_t>(parse_uint32(val, power.ac_min_active_percent), 100);
             else if (key == L"last_input_hold_ms") power.last_input_hold_ms = parse_uint32(val, power.last_input_hold_ms);
             else if (key == L"boost_grace_ms") power.boost_grace_ms = parse_uint32(val, power.boost_grace_ms);
             else if (key == L"busy_cpu_percent_threshold") power.busy_cpu_percent_threshold = parse_double(val, power.busy_cpu_percent_threshold);
             else if (key == L"busy_gpu_percent_threshold") power.busy_gpu_percent_threshold = parse_double(val, power.busy_gpu_percent_threshold);
+            else if (key == L"busy_io_ops_per_sec_threshold") power.busy_io_ops_per_sec_threshold = parse_double(val, power.busy_io_ops_per_sec_threshold);
         } else if (current_section == L"memory") {
             if (key == L"pressure_threshold_percent") memory.pressure_threshold_percent = parse_uint32(val, memory.pressure_threshold_percent);
             else if (key == L"trim_interval_seconds") memory.trim_interval_seconds = parse_uint32(val, memory.trim_interval_seconds);
@@ -192,10 +195,13 @@ bool Config::save_to_file(const std::wstring& file_path) const {
     file << L"busy_poll_interval_ms = " << power.busy_poll_interval_ms << L"\n";
     file << L"idle_poll_interval_ms = " << power.idle_poll_interval_ms << L"\n";
     file << L"idle_hysteresis_ms = " << power.idle_hysteresis_ms << L"\n";
+    file << L"ac_idle_hysteresis_ms = " << power.ac_idle_hysteresis_ms << L"\n";
+    file << L"ac_min_active_percent = " << power.ac_min_active_percent << L"\n";
     file << L"last_input_hold_ms = " << power.last_input_hold_ms << L"\n";
     file << L"boost_grace_ms = " << power.boost_grace_ms << L"\n";
     file << L"busy_cpu_percent_threshold = " << power.busy_cpu_percent_threshold << L"\n";
-    file << L"busy_gpu_percent_threshold = " << power.busy_gpu_percent_threshold << L"\n\n";
+    file << L"busy_gpu_percent_threshold = " << power.busy_gpu_percent_threshold << L"\n";
+    file << L"busy_io_ops_per_sec_threshold = " << power.busy_io_ops_per_sec_threshold << L"\n\n";
 
     file << L"[memory]\n";
     file << L"pressure_threshold_percent = " << memory.pressure_threshold_percent << L"\n";
