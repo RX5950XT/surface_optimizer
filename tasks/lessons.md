@@ -17,3 +17,5 @@
 - 前台「有任何 IO」不能當忙碌訊號：閒置的 Electron（Claude、VoiceInk）靠 pipe IPC 每秒就有 150～800 次 IO，插電時 73% 時間被卡在 EPP 0／Min 100%。要看每秒 IO 次數門檻。
 - `make clean` 會刪根目錄 exe，服務在跑時也刪得掉；要換版先 `make TARGET=build/xxx.exe` 再停服務複製。
 - 發布前要用一般使用者跑 `--status`；Global IPC 的 DACL 除了讀寫，也要允許 `SYNCHRONIZE`，否則服務雖正常但狀態會誤判未啟動。
+- `GUID_ACDC_POWER_SOURCE` 必須對照 Windows SDK `winnt.h`（`{5d3e9a59-e9d5-4b00-a6bd-ff34ff516548}`），寫錯會收不到插拔電切換廣播；`Service::m_current_is_ac` 也要從 `GetSystemPowerStatus` 初始化與對齊，否則電量通知先觸發時會用預設 `true` 把電池狀態蓋成插電。
+- 電池模式的 `InstantBoost` 不可寫死 `Boost=2` 與 `Min=100%`，需依 `dc_boost_mode` 與 `5%` 下限運作。

@@ -31,8 +31,8 @@ namespace surface_optimizer {
 
 namespace {
 
-static const GUID GUID_ACDC_POWER_SOURCE_VAL = 
-    { 0x5d3e4a2d, 0xe6da, 0x4704, { 0x88, 0x6f, 0x38, 0x50, 0x33, 0x8d, 0xa2, 0x1f } };
+static const GUID GUID_ACDC_POWER_SOURCE_VAL =
+    { 0x5d3e9a59, 0xe9d5, 0x4b00, { 0xa6, 0xbd, 0xff, 0x34, 0xff, 0x51, 0x65, 0x48 } };
 static const GUID GUID_BATTERY_PERCENTAGE_REMAINING_VAL = 
     { 0xa7ad8041, 0xb45a, 0x4cae, { 0x87, 0xa3, 0xee, 0xcb, 0xb4, 0x68, 0xa9, 0xe1 } };
 
@@ -173,6 +173,19 @@ void Service::unregister_power_notifications() {
     }
 }
 
+void Service::sync_power_status_from_os() {
+    SYSTEM_POWER_STATUS sps{};
+    if (!GetSystemPowerStatus(&sps)) {
+        return;
+    }
+    if (sps.ACLineStatus == 0 || sps.ACLineStatus == 1) {
+        m_current_is_ac = (sps.ACLineStatus == 1);
+    }
+    if (sps.BatteryLifePercent != 255) {
+        m_current_battery_percent = sps.BatteryLifePercent;
+    }
+}
+
 void Service::process_power_broadcast_setting(PPOWERBROADCAST_SETTING setting) {
     if (!setting) return;
 
@@ -187,6 +200,7 @@ void Service::process_power_broadcast_setting(PPOWERBROADCAST_SETTING setting) {
         }
     } else if (IsEqualGUID(setting->PowerSetting, GUID_BATTERY_PERCENTAGE_REMAINING_VAL)) {
         if (setting->DataLength >= sizeof(DWORD)) {
+            sync_power_status_from_os();
             DWORD percent = *reinterpret_cast<const DWORD*>(setting->Data);
             m_current_battery_percent = percent;
             LOG_INFO(L"Battery level update: " + std::to_wstring(percent) + L"%");
@@ -743,6 +757,7 @@ int Service::run_daemon_loop(bool is_interactive) {
     }
 
     // 5. Initialize Subsystems (M2: PowerManager, M3: MemoryManager)
+    sync_power_status_from_os();
     PowerManager::get_instance().initialize();
     MemoryManager::get_instance().initialize();
     ProcessGuardian::get_instance().initialize();
@@ -841,6 +856,13 @@ int Service::run_daemon_loop(bool is_interactive) {
             if (!paused &&
                 std::chrono::duration_cast<std::chrono::milliseconds>(now - last_slow).count() >= static_cast<int64_t>(slow_ms)) {
                 last_slow = now;
+                const bool prev_ac = m_current_is_ac;
+                sync_power_status_from_os();
+                if (m_current_is_ac != prev_ac && m_power_callback) {
+                    LOG_INFO(L"Power source reconciled from OS: " +
+                             std::wstring(m_current_is_ac ? L"AC (Plugged in)" : L"DC (Battery)"));
+                    m_power_callback(m_current_is_ac, m_current_battery_percent);
+                }
                 MemoryManager::get_instance().on_housekeeping(
                     MemoryManager::get_instance().get_current_foreground_pid(),
                     m_current_is_ac

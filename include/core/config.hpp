@@ -9,8 +9,8 @@ namespace surface_optimizer {
 struct PowerConfig {
     uint32_t ac_epp_idle = 60;
     uint32_t ac_epp_active = 0;
-    uint32_t dc_epp_idle = 80;
-    uint32_t dc_epp_active = 50;
+    uint32_t dc_epp_idle = 90;
+    uint32_t dc_epp_active = 70;
     uint32_t battery_saver_epp = 100;
     uint32_t battery_saver_threshold_percent = 20;
     uint32_t ac_boost_mode = 2; // 0=Disabled, 2=Aggressive
@@ -18,9 +18,10 @@ struct PowerConfig {
     uint32_t fast_ramp_duration_ms = 3000; // fallback when process times cannot be sampled
     uint32_t busy_poll_interval_ms = 250;
     uint32_t idle_poll_interval_ms = 250;
-    uint32_t idle_hysteresis_ms = 250;
+    uint32_t idle_hysteresis_ms = 1000;
     uint32_t ac_idle_hysteresis_ms = 1000;
     uint32_t ac_min_active_percent = 5;
+    uint32_t dc_max_processor_percent = 85;
     uint32_t last_input_hold_ms = 1000;
     uint32_t boost_grace_ms = 200;
     double busy_cpu_percent_threshold = 8.0;

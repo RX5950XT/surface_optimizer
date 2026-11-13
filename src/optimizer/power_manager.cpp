@@ -29,7 +29,7 @@ const GUID PowerManager::GUID_SUBGROUP_PCIEXPRESS =
 const GUID PowerManager::GUID_PCIEXPRESS_ASPM =
     { 0xee12f906, 0xd277, 0x404b, { 0xb6, 0xda, 0xe5, 0xfa, 0x1a, 0x57, 0x6d, 0xf5 } };
 const GUID PowerManager::GUID_ACDC_SOURCE =
-    { 0x5d3e4a2d, 0xe6da, 0x4704, { 0x88, 0x6f, 0x38, 0x50, 0x33, 0x8d, 0xa2, 0x1f } };
+    { 0x5d3e9a59, 0xe9d5, 0x4b00, { 0xa6, 0xbd, 0xff, 0x34, 0xff, 0x51, 0x65, 0x48 } };
 const GUID PowerManager::GUID_BATTERY_PERCENT =
     { 0xa7ad8041, 0xb45a, 0x4cae, { 0x87, 0xa3, 0xee, 0xcb, 0xb4, 0x68, 0xa9, 0xe1 } };
 
@@ -196,7 +196,7 @@ bool PowerManager::initialize() {
     }
 
     DWORD ac_epp = 60, dc_epp = 80, ac_boost = 2, dc_boost = 0;
-    DWORD ac_min = 100, dc_min = 30, ac_cpmin = 100, dc_cpmin = 12;
+    DWORD ac_min = 100, dc_min = 30, ac_max = 100, dc_max = 100, ac_cpmin = 100, dc_cpmin = 12;
     DWORD ac_smt = 0, dc_smt = 0, ac_aspm = 2, dc_aspm = 2;
     PowerReadACValueIndex(nullptr, &m_active_scheme_guid, const_cast<GUID*>(&GUID_SUBGROUP_PROCESSOR), const_cast<GUID*>(&GUID_EPP_POLICY), &ac_epp);
     PowerReadDCValueIndex(nullptr, &m_active_scheme_guid, const_cast<GUID*>(&GUID_SUBGROUP_PROCESSOR), const_cast<GUID*>(&GUID_EPP_POLICY), &dc_epp);
@@ -204,6 +204,8 @@ bool PowerManager::initialize() {
     PowerReadDCValueIndex(nullptr, &m_active_scheme_guid, const_cast<GUID*>(&GUID_SUBGROUP_PROCESSOR), const_cast<GUID*>(&GUID_PERF_BOOST), &dc_boost);
     PowerReadACValueIndex(nullptr, &m_active_scheme_guid, const_cast<GUID*>(&GUID_SUBGROUP_PROCESSOR), const_cast<GUID*>(&GUID_PROCTHROTTLE_MIN), &ac_min);
     PowerReadDCValueIndex(nullptr, &m_active_scheme_guid, const_cast<GUID*>(&GUID_SUBGROUP_PROCESSOR), const_cast<GUID*>(&GUID_PROCTHROTTLE_MIN), &dc_min);
+    PowerReadACValueIndex(nullptr, &m_active_scheme_guid, const_cast<GUID*>(&GUID_SUBGROUP_PROCESSOR), const_cast<GUID*>(&GUID_PROCTHROTTLE_MAX), &ac_max);
+    PowerReadDCValueIndex(nullptr, &m_active_scheme_guid, const_cast<GUID*>(&GUID_SUBGROUP_PROCESSOR), const_cast<GUID*>(&GUID_PROCTHROTTLE_MAX), &dc_max);
     PowerReadACValueIndex(nullptr, &m_active_scheme_guid, const_cast<GUID*>(&GUID_SUBGROUP_PROCESSOR), const_cast<GUID*>(&GUID_CPMINCORES), &ac_cpmin);
     PowerReadDCValueIndex(nullptr, &m_active_scheme_guid, const_cast<GUID*>(&GUID_SUBGROUP_PROCESSOR), const_cast<GUID*>(&GUID_CPMINCORES), &dc_cpmin);
     PowerReadACValueIndex(nullptr, &m_active_scheme_guid, const_cast<GUID*>(&GUID_SUBGROUP_PROCESSOR), const_cast<GUID*>(&GUID_SMTUNPARKPOLICY), &ac_smt);
@@ -217,6 +219,8 @@ bool PowerManager::initialize() {
     m_saved_dc_boost = dc_boost;
     m_saved_ac_min = ac_min;
     m_saved_dc_min = dc_min;
+    m_saved_ac_max = ac_max;
+    m_saved_dc_max = dc_max;
     m_saved_ac_cpmin = ac_cpmin;
     m_saved_dc_cpmin = dc_cpmin;
     m_saved_ac_smt = ac_smt;
@@ -292,33 +296,39 @@ void PowerManager::evaluate_and_apply_governor(bool force_apply) {
     uint32_t target_epp = 60;
     uint32_t target_boost = 2;
     uint32_t target_min = 5;
+    uint32_t target_max = 100;
     uint32_t target_unpark = 25;
     const bool ac = (m_current_power_source == PowerSource::AC);
+    const uint32_t dc_max_cap = std::clamp<uint32_t>(config.power.dc_max_processor_percent, 20, 100);
 
     if (m_current_battery_percent <= config.power.battery_saver_threshold_percent && !ac) {
         target_profile = PerformanceProfile::BatterySaver;
         target_epp = config.power.battery_saver_epp;
         target_boost = 0;
         target_min = 5;
+        target_max = std::min<uint32_t>(dc_max_cap, 70);
         target_unpark = 12;
     } else if (m_is_fast_ramp_active) {
         target_profile = PerformanceProfile::InstantBoost;
         target_epp = ac ? config.power.ac_epp_active : config.power.dc_epp_active;
-        target_boost = ac ? config.power.ac_boost_mode : 2;
-        // AC: EPP 0 lets HWP ramp in ~1 ms, so pinning Min=100% only burns power between bursts.
-        target_min = ac ? config.power.ac_min_active_percent : 100;
-        target_unpark = 100;
+        target_boost = ac ? config.power.ac_boost_mode : config.power.dc_boost_mode;
+        // EPP lets HWP ramp in ~1 ms, so pinning Min=100% only burns power between bursts.
+        target_min = ac ? config.power.ac_min_active_percent : 5;
+        target_max = ac ? 100 : dc_max_cap;
+        target_unpark = ac ? 100 : 25;
     } else if (ac) {
         target_profile = PerformanceProfile::HighPerformance;
         target_epp = config.power.ac_epp_idle;
         target_boost = config.power.ac_boost_mode;
         target_min = 5;
+        target_max = 100;
         target_unpark = 25;
     } else {
         target_profile = PerformanceProfile::Balanced;
         target_epp = config.power.dc_epp_idle;
         target_boost = config.power.dc_boost_mode;
         target_min = 5;
+        target_max = dc_max_cap;
         target_unpark = 12;
     }
 
@@ -326,26 +336,30 @@ void PowerManager::evaluate_and_apply_governor(bool force_apply) {
         write_ac_epp(target_epp);
         write_ac_boost(target_boost);
         write_index(GUID_PROCTHROTTLE_MIN, true, target_min);
+        write_index(GUID_PROCTHROTTLE_MAX, true, target_max);
         write_index(GUID_CPMINCORES, true, target_unpark);
     } else {
         write_dc_epp(target_epp);
         write_dc_boost(target_boost);
         write_index(GUID_PROCTHROTTLE_MIN, false, target_min);
+        write_index(GUID_PROCTHROTTLE_MAX, false, target_max);
         write_index(GUID_CPMINCORES, false, target_unpark);
     }
 
     if (force_apply || target_epp != m_active_epp || target_boost != m_active_boost ||
         target_profile != m_current_profile || target_min != m_active_min ||
-        target_unpark != m_active_unpark) {
+        target_max != m_active_max || target_unpark != m_active_unpark) {
         apply_active_scheme();
         m_active_epp = target_epp;
         m_active_boost = target_boost;
         m_current_profile = target_profile;
         m_active_min = target_min;
+        m_active_max = target_max;
         m_active_unpark = target_unpark;
         LOG_INFO(L"Power Governor applied: EPP=" + std::to_wstring(target_epp) +
                  L"%, Boost=" + std::to_wstring(target_boost) +
                  L", Min=" + std::to_wstring(target_min) +
+                 L"%, Max=" + std::to_wstring(target_max) +
                  L"%, Unpark=" + std::to_wstring(target_unpark) +
                  L"%, Profile=" + std::to_wstring(static_cast<int>(target_profile)));
     }
@@ -614,6 +628,8 @@ void PowerManager::restore_baseline() {
     write_dc_boost(m_saved_dc_boost);
     write_index(GUID_PROCTHROTTLE_MIN, true, m_saved_ac_min);
     write_index(GUID_PROCTHROTTLE_MIN, false, m_saved_dc_min);
+    write_index(GUID_PROCTHROTTLE_MAX, true, m_saved_ac_max);
+    write_index(GUID_PROCTHROTTLE_MAX, false, m_saved_dc_max);
     write_index(GUID_CPMINCORES, true, m_saved_ac_cpmin);
     write_index(GUID_CPMINCORES, false, m_saved_dc_cpmin);
     write_index(GUID_SMTUNPARKPOLICY, true, m_saved_ac_smt);

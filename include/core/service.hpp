@@ -90,6 +90,7 @@ private:
     HANDLE acquire_global_mutex();
 
     // Event hooks & power notification handles
+    void sync_power_status_from_os();
     void register_power_notifications(HANDLE recipient, bool is_service_handle);
     void unregister_power_notifications();
     void process_power_broadcast_setting(PPOWERBROADCAST_SETTING setting);

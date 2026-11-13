@@ -95,6 +95,8 @@ private:
     uint32_t m_saved_dc_boost = 0;
     uint32_t m_saved_ac_min = 100;
     uint32_t m_saved_dc_min = 30;
+    uint32_t m_saved_ac_max = 100;
+    uint32_t m_saved_dc_max = 100;
     uint32_t m_saved_ac_cpmin = 100;
     uint32_t m_saved_dc_cpmin = 12;
     uint32_t m_saved_ac_smt = 0;
@@ -111,6 +113,7 @@ private:
     uint32_t m_active_epp = 60;
     uint32_t m_active_boost = 2;
     uint32_t m_active_min = 100;
+    uint32_t m_active_max = 100;
     uint32_t m_active_unpark = 100;
 
     std::chrono::steady_clock::time_point m_last_foreground_switch_time{};

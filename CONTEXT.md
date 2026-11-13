@@ -47,6 +47,7 @@
 ### 驗證結果
 
 - 2026-08-29 發布版：完整編譯成功、`test_burst_policy` 30 項通過、`audit_ipc_security.ps1` 通過；一般使用者 `--status` 顯示 daemon RUNNING，系統列 IPC 可讀寫。部署 SHA-256：`69AE630A…C3F05652C`。
+- 2026-11-13 電池誤判與調校修復：修正 `GUID_ACDC_POWER_SOURCE` 錯誤 GUID、`Service` 啟動／電量事件／背景巡檢同步 `GetSystemPowerStatus`；電池 `InstantBoost` 改用 `dc_boost_mode=0`、`Min=5%`、`Unpark=25%`，並新增 `dc_max_processor_percent=85`、`dc_epp_idle=90`、`dc_epp_active=70`、`idle_hysteresis_ms=1000` 降低切換震盪。部署 SHA-256：`163CE08F…5B503B05`。
 - 2026-09-15：前台 IO 忙碌改成每秒 ≥1000 次（`busy_io_ops_per_sec_threshold`）。修正前插電時全速佔 72.9%、12 天切換 14,698 次。
 - 2026-09-15 插電省電：爆發 Min 改 5%（`ac_min_active_percent`，EPP 0 已夠快）、插電降頻 hysteresis 1000 ms、busy poll 250 ms、插電巡查 15 s；已因輸入／CPU／IO 維持爆發時不查 PDH GPU。每分鐘 INFO log `Burst hold polls (60s)` 記下維持爆發的原因。修正前服務本身約 2.3% 單核。
 - 2026-08-29：服務 + 系統列 helper 私有記憶體 8.3 MB，工作集 23.8 MB。
