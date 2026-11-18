@@ -23,5 +23,5 @@
 
 ## 文件與 Git
 
-- README 使用繁體中文。規則或架構有實質變動時，同步維護精簡的 `CLAUDE.md`、`AGENTS.md` 與根目錄 `CONTEXT.md`。
+- README 使用繁體中文。規則或架構有實質變動時，同步維護精簡的 `CLAUDE.md`、`AGENTS.md`；交接資訊更新到 `tasks/todo.md`（≤100 行）。
 - Commit 格式：`<type>: <description>`；可用 `feat`、`fix`、`refactor`、`docs`、`test`、`chore`、`perf`、`ci`。

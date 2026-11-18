@@ -1,74 +1,51 @@
-# 發布整理與推送
+# surface_optimizer todo
+最後更新：2026-11-19
 
-- [x] 審查變更與確認排除建置產物
-- [x] 將暫存建置產物移入已忽略目錄
-- [x] 更新 README 與 CONTEXT 的本次發布資訊
-- [x] 執行編譯／測試／服務狀態驗證
-- [x] 建立 commit 並推送 `master`
+## 現況（交接）
 
-# 效能優化可行性探查
+- C++20 原生靜態編譯的 Windows 背景守護程式，針對 Surface Pro 7（i7-1065G7 Ice Lake）做效能與能耗優化。Windows 服務 `SurfaceOptimizer` 常駐；登入後 `--foreground-watch` 放系統列圖示（左鍵開關優化、右鍵開機自啟動）。CLI 與使用方式見 README。
+- 沒有設定視窗：改 `surface_optimizer.toml` 後要 `--stop` 再 `--start` 才整份重載。
+- 本機服務路徑 `"C:\RX5950XT\surface_optimizer\surface_optimizer.exe" --daemon`；日誌 `C:\ProgramData\surface_optimizer\surface_optimizer.log`。
+- 工具鏈：GCC 14.2.0（MSYS2 UCRT64）、C++20、`-O3 -flto -s -static`，零外部依賴，執行檔約 1.35 MB。
+- 目前部署版（2026-11-13）：SHA-256 `163CE08FA71C460B10D29D332FDF97EB24D1D781FA19C3CF2D857B5E5B503B05`；舊版備份在 `build/backup-20261113/`。
 
-- [x] 建立 `AGENTS.md` 與 `CLAUDE.md` 共用規範
-- [x] 追查 CPU 調度、行程守護與記憶體整理的完整資料流
-- [x] 量測目前執行檔與服務的基線成本
-- [x] 修正誤判記憶體洩漏與重複親和性檢查
-- [x] 根據程式與量測結果判定可行優化，補上 Review
-- [x] 以系統管理員權限部署並重測新版本
+### 模組
 
-# 系統列圖示：開關優化、開機自啟動
+| 模組 | 檔案 | 功能 |
+|---|---|---|
+| M1 核心服務 | `core/service`, `config`, `logger`, `utils`, `tray`, `ui_state` | 服務、事件迴圈、CLI；`--foreground-watch` 負責前台視窗、LastInput 與系統列圖示。全域 IPC 限 `SYSTEM` 與互動使用者，命令值只收 0／1 |
+| M2 CPU 調度 | `optimizer/power_manager`, `optimizer/burst_policy` | EPP + Boost + Min processor state + CPMINCORES + GPU 忙碌維持 + 插電 ASPM Off；前台／輸入／CPU／IO／GPU 忙碌時 InstantBoost，安靜超過 hysteresis 降回 |
+| M3 記憶體 | `optimizer/memory_manager` | EmptyWorkingSet 背景修剪（75%）；Standby List 預設不清，僅手動或 enable 且 RAM≥85% |
+| M4 進程守護 | `optimizer/process_guardian`, `cpu_reserve`, `memory_leak_policy` | 前台 HighQoS、背景 EcoQoS；非白名單行程親和性避開第一顆實體核（`0xfc`，`0x3` 留給系統）；單次工作集成長 >100 MB 才算洩漏 |
+| M5 探測 | `telemetry/platform_probe` | 唯讀：CPUID、CpuSet、PPM、NtPower MHz、EPP 套用延遲；`--status` 不寫電源方案 |
 
-- [x] SharedUiState：暫停／開機自啟指令
-- [x] 暫停時還原電源方案與親和性
-- [x] `--foreground-watch` 系統列圖示
-- [x] 互動模式同樣有圖示
-- [x] 編譯並重啟服務（watch PID 已起來）
+### 硬體事實（2026-08-28 實測）
 
-## MCP client 修復計畫
+- 4C/8T 均質、沒有大小核（CpuSet `EfficiencyClass` 全 0），EcoQoS 只降頻不換核。
+- CPUID.06H EAX=`0x178ff3`：HWP / EPP / Activity Window 都有；PECI override=yes（EC 可蓋過 OS 的 Min/Max/EPP）；無 Turbo Boost Max 3.0。
+- 作用中方案高效能；`PERFAUTONOMOUS` AC/DC 都是 1。出廠插電 `PROCTHROTTLEMIN=100%`、`CPMINCORES=100%`（閒置幾乎不能降頻），電池 `MIN=30%`、`CPMINCORES=12%`。
+- 高效能方案插電 PCIe ASPM=2 會讓 NVMe 第一次 I/O 頓；daemon 把 AC 改 0、DC 留 2。
+- `PowerWrite` + `PowerSetActiveScheme` 讓 EPP 生效約 93 ms（HWP 選頻本身約 1 ms，瓶頸在方案套用）。
+- RAPL PL1/PL2/Tau 使用者態讀不到；不裝 WinRing0。
 
-- [ ] 找出目前有效的 Codex runtime 與 FreeCAD 安裝狀態
-- [ ] 修正 `node_repl` 路徑與 `freecad` 啟動設定
-- [ ] 用 CLI 與 JSON-RPC initialize 驗證
+### 關鍵調校與決策
 
-## Review
+- 電池（2026-11-13）：修正 `GUID_ACDC_POWER_SOURCE` 錯誤 GUID（正確 `{5d3e9a59-e9d5-4b00-a6bd-ff34ff516548}`）；`Service` 啟動／電量事件／背景巡檢用 `GetSystemPowerStatus` 同步 AC 狀態。電池 InstantBoost 用 `dc_boost_mode=0`、`Min=5%`、`Unpark=25%`；`dc_max_processor_percent=85`（低電量 ≤70%）、`dc_epp_idle=90`、`dc_epp_active=70`、`idle_hysteresis_ms=1000`。`PowerManager` 會備份／還原 AC/DC `PROCTHROTTLE_MAX`。
+- 插電（2026-09-15）：爆發 Min 5%（`ac_min_active_percent`）、降頻 hysteresis 1000 ms、busy poll 250 ms、巡查 15 s；前台 IO 忙碌門檻每秒 ≥1000 次（`busy_io_ops_per_sec_threshold`，修正前插電全速佔 72.9%）。已因輸入／CPU／IO 維持爆發時不查 PDH GPU；每分鐘 INFO log `Burst hold polls (60s)` 記原因。
+- `ProcessGuardian` 每 5 秒掃描，已限制的 PID 不重複開啟。
+- 關閉優化不停服務（否則圖示一起消失）；暫停時還原電源方案與親和性。圖示在 Windows 11 可能先落在系統列溢位。
 
-- 2026-08-29 基線：服務 30 秒用 0.8438 秒 CPU（單核心 2.7913%）；系統列 helper 為 0%。
-- `ProcessGuardian` 每 5 秒掃描全部行程；已限制的 PID 不再重複開啟與讀取親和性。
-- 修正後只有單次工作集成長超過 100 MB 才會累積洩漏計數，不會再因數 MB 波動降權。
-- `build/security-verify/surface_optimizer.exe` 完整編譯成功；`test_burst_policy` 30 項全過。
-- 已以系統管理員權限部署；服務 RUNNING（PID 77128），執行檔 SHA-256=`69AE630A…C3F05652C`，前一版保留於已忽略的 `build/release-verify-20260829/`。
-- 部署後 30 秒：服務 0.4531 CPU 秒（1.4892% 單核心），helper 0.0312 CPU 秒（0.1024%）；服務用量下降約 46.7%。
-- 部署後日誌沒有新的 `Memory leak suspected`；服務只在啟動時套用 99 個行程的 OS CPU reserve。
-- 圖示在使用者工作階段；Windows 11 可能先丟在系統列溢位。
-- 關閉優化不會停服務，否則圖示會一起消失。
+### 驗證與實測
 
-# 修復電池模式誤判為 AC 與過度升頻耗電（2026-11-13）
+- 測試：`test_burst_policy` 36/36、`audit_ipc_security.ps1` 通過（2026-11-13）。
+- 改 header 後要清掉 `build/fix_obj` 再編，否則會 `-Wlto-type-mismatch`。
+- 2026-08-29：服務 30 秒閒置 1.4892% 單核（修正前 2.7913%，降約 46.7%），helper 0.1024%；私有記憶體 8.3 MB、工作集 23.8 MB。
+- 記憶體修剪實測回收 >1 GB；ProcessGuardian 掃描 77 進程、22 項白名單正常。
 
-- [x] 修正 `GUID_ACDC_POWER_SOURCE` 常數（`service.cpp` 與 `power_manager.cpp`）為 Windows SDK 正確值 `{5d3e9a59-e9d5-4b00-a6bd-ff34ff516548}`
-- [x] 在 `Service` 啟動與電量／背景巡檢時透過 `GetSystemPowerStatus` 同步 `m_current_is_ac` 與電量，避免預設 `true` 蓋掉 `PowerManager` 電池狀態
-- [x] 修正 `PowerManager::evaluate_and_apply_governor` 電池 `InstantBoost` 分支改用 `dc_boost_mode`、`Min=5%`、`Unpark=25%`
-- [x] 編譯 `build/fix/surface_optimizer.exe` 並執行既有測試與安全性／依賴檢查
-- [x] 部署新版服務並驗證 `SurfaceOptimizer` 正確進入 DC 省電狀態
-- [x] 補上 Review 與更新 `CONTEXT.md`
+## 待辦
 
-### Review（2026-11-13）
+- 目前無本專案未完成項目。
 
-- 編譯與靜態檢查：`build/fix/surface_optimizer.exe`（`-O3 -flto -s -static`）無新增外部 DLL；`test_burst_policy` 36/36 全過；`audit_ipc_security.ps1` 通過。
-- 部署：透過管理員 UAC 停服務、備份舊版至 `build/backup-20261113/surface_optimizer.exe`、替換執行檔並重啟 `SurfaceOptimizer`（PID `5372`，SHA-256 `8DCAD1101C7277A976770F766996A85E6FD57A8B018DEEAF8F01DA1AA0EA5FB3`）。
-- 實測日誌與 `--status`：啟動後收到 `Power source transition detected: DC (Battery)`，`PERFEPP DC=50`（爆發）／`80`（閒置）、`PERFBOOSTMODE DC=0`、`PROCTHROTTLEMIN DC=5%`、`CPMINCORES DC=25%`（爆發）／`12%`（閒置）、`PCIE ASPM DC=2`。
+## 已知問題／刻意不處理
 
-# 電池模式降震盪與溫和省電調校（2026-11-13）
-
-- [x] 新增 `dc_max_processor_percent`（預設 `85`，限制 `20`–`100`）並調高 `dc_epp_idle = 90`、`dc_epp_active = 70`、`idle_hysteresis_ms = 1000`
-- [x] 在 `PowerManager` 備份／還原 AC/DC `GUID_PROCTHROTTLE_MAX`，並在電池模式套用 `dc_max_processor_percent`（低電量省電進一步降至 ≤70%）
-- [x] 編譯 `build/fix/surface_optimizer.exe`、執行測試與安全稽核、透過 UAC 部署重啟服務並實測驗證
-- [x] 補上 Review 與更新 `CONTEXT.md`
-
-### Review（2026-11-13 調校）
-
-- 乾淨重編 `build/fix/surface_optimizer.exe`（清掉 `build/fix_obj` 避免 header 變更造成 `-Wlto-type-mismatch`），零警告且無新增外部 DLL。
-- `test_burst_policy.exe` 36/36 通過、`audit_ipc_security.ps1` 通過。
-- UAC 部署重啟 `SurfaceOptimizer`（`PID 17128`，SHA-256 `163CE08FA71C460B10D29D332FDF97EB24D1D781FA19C3CF2D857B5E5B503B05`），`--status` 與日誌確認套用 `EPP=70%`/`90%`、`Boost=0`、`Min=5%`、`Max=85%`、`Unpark=25%`/`12%`、`idle_hysteresis_ms=1000`。
-
-
-
-
+- 舊 todo 殘留「MCP client 修復計畫」（Codex runtime、FreeCAD `node_repl` 路徑），與本專案無關，未處理：找出有效 Codex runtime 與 FreeCAD 安裝、修正 `node_repl` 與 `freecad` 啟動設定、用 CLI 與 JSON-RPC initialize 驗證。
